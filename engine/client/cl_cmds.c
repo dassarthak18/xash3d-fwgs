@@ -97,7 +97,17 @@ void CL_PlayCDTrack_f( void )
 		if( Q_isdigit( pszTrack ))
 		{
 			track = bound( 1, Q_atoi( Cmd_Argv( 2 )), MAX_CDTRACKS );
-			S_StartBackgroundTrack( clgame.cdtracks[track-1], clgame.cdtracks[track-1], 0, false );
+
+			// a1ba: some maps contain cd track set in worldspawn
+			// forcibly stopping music on changelevel
+			//
+			// server notifies us about this in sv_client.c SV_PutClientInServer
+			// through "cd loop" command
+			//
+			// however, it could be set to a track that doesn't contain music data (in CD terms)
+			// so we catch it here and music will carry over changelevels
+			if( !COM_StringEmpty( clgame.cdtracks[track-1] ))
+				S_StartBackgroundTrack( clgame.cdtracks[track-1], clgame.cdtracks[track-1], 0, false );
 		}
 		else S_StartBackgroundTrack( pszTrack, pszTrack, 0, true );
 		paused = false;
@@ -136,10 +146,13 @@ void CL_PlayCDTrack_f( void )
 	}
 	else if( !Q_stricmp( command, "info" ))
 	{
-		int	i, maxTrack;
+		int	maxTrack = 0;
 
-		for( maxTrack = i = 0; i < MAX_CDTRACKS; i++ )
-			if( COM_CheckStringEmpty( clgame.cdtracks[i] ) ) maxTrack++;
+		for( int i = 0; i < MAX_CDTRACKS; i++ )
+		{
+			if( !COM_StringEmpty( clgame.cdtracks[i] ) )
+				maxTrack++;
+		}
 
 		Con_Printf( "%u tracks\n", maxTrack );
 		if( track )

@@ -27,6 +27,10 @@ GNU General Public License for more details.
 #include "library.h"
 #include "platform/platform.h"
 
+#if XASH_WIN32
+#include <direct.h>
+#endif
+
 static CVAR_DEFINE_AUTO( fs_mount_hd, "0", FCVAR_PRIVILEGED, "mount high definition content folder" );
 static CVAR_DEFINE_AUTO( fs_mount_lv, "0", FCVAR_PRIVILEGED, "mount low violence models content folder" );
 static CVAR_DEFINE_AUTO( fs_mount_addon, "0", FCVAR_PRIVILEGED, "mount addon content folder" );
@@ -125,8 +129,9 @@ static void FS_LoadVFSConfig( const char *gamedir )
 void FS_SaveVFSConfig( void )
 {
 	file_t *f;
+	const qboolean force_save = !FS_FileExists( "vfs.cfg", true );
 
-	if( !FBitSet( fs_mount_hd.flags|fs_mount_lv.flags|fs_mount_l10n.flags|fs_mount_addon.flags|ui_language.flags, FCVAR_CHANGED ))
+	if( !force_save && !FBitSet( fs_mount_hd.flags|fs_mount_lv.flags|fs_mount_l10n.flags|fs_mount_addon.flags|ui_language.flags, FCVAR_CHANGED ))
 	{
 		Con_Reportf( "%s: no need to save vfs.cfg\n", __func__ );
 		return;
@@ -137,7 +142,7 @@ void FS_SaveVFSConfig( void )
 	f = FS_Open( "vfs.cfg.new", "w", true );
 	if( !f )
 	{
-		Con_Printf( S_ERROR "%s: couldn't open vfs.cfg for write\n", __func__ );
+		Con_Printf( S_ERROR "%s: can't open %s for write\n", __func__, "vfs.cfg.new" );
 		return;
 	}
 
@@ -253,24 +258,15 @@ static qboolean FS_DetermineRootDirectory( char *out, size_t size )
 {
 	const char *path = getenv( "XASH3D_BASEDIR" );
 
-	if( COM_CheckString( path ))
+	if( !COM_StringEmptyOrNULL( path ))
 	{
 		Q_strncpy( out, path, size );
 		return true;
 	}
 
-#if TARGET_OS_IOS
+#if XASH_IOS
 	Q_strncpy( out, IOS_GetDocsDir(), size );
 	return true;
-#elif XASH_ANDROID && XASH_SDL
-	path = SDL_AndroidGetExternalStoragePath();
-	if( path != NULL )
-	{
-		Q_strncpy( out, path, size );
-		return true;
-	}
-	Sys_Error( "couldn't determine Android external storage path: %s", SDL_GetError( ));
-	return false;
 #elif XASH_PSVITA
 	if( PSVita_GetBasePath( out, size ))
 		return true;
@@ -318,11 +314,16 @@ static qboolean FS_DetermineReadOnlyRootDirectory( char *out, size_t size )
 	if( _Sys_GetParmFromCmdLine( "-rodir", out, size ))
 		return true;
 
-	if( COM_CheckString( env_rodir ))
+	if( !COM_StringEmptyOrNULL( env_rodir ))
 	{
 		Q_strncpy( out, env_rodir, size );
 		return true;
 	}
+
+#if XASH_IOS
+	Q_strncpy( out, IOS_GetExecDir(), size );
+	return true;
+#endif
 
 	return false;
 }
@@ -332,13 +333,13 @@ static qboolean FS_DetermineReadOnlyRootDirectory( char *out, size_t size )
 FS_Init
 ================
 */
-void FS_Init( const char *basedir )
+void FS_Init( void )
 {
 	string gamedir;
 	char rodir[MAX_OSPATH], rootdir[MAX_OSPATH];
 	rodir[0] = rootdir[0] = 0;
 
-	if( !FS_DetermineRootDirectory( rootdir, sizeof( rootdir )) || !COM_CheckStringEmpty( rootdir ))
+	if( !FS_DetermineRootDirectory( rootdir, sizeof( rootdir )) || COM_StringEmpty( rootdir ))
 	{
 		Sys_Error( "couldn't determine current directory (empty string)" );
 		return;
@@ -356,7 +357,7 @@ void FS_Init( const char *basedir )
 		if( env )
 			Q_strncpy( gamedir, env, sizeof( gamedir ));
 		else
-			Q_strncpy( gamedir, basedir, sizeof( gamedir )); // gamedir == basedir
+			Q_strncpy( gamedir, host.default_gamedir, sizeof( gamedir )); // gamedir == basedir
 	}
 
 	FS_LoadProgs();
@@ -368,7 +369,7 @@ void FS_Init( const char *basedir )
 	// and this better be reworked at some point
 	g_fsapi.SetCurrentDirectory( rootdir );
 
-	if( !g_fsapi.InitStdio( true, rootdir, basedir, gamedir, rodir ))
+	if( !g_fsapi.InitStdio( true, rootdir, host.default_gamedir, gamedir, rodir ))
 	{
 		Sys_Error( "Can't init filesystem_stdio!\n" );
 		return;

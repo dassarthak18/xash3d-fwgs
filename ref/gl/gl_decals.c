@@ -697,11 +697,8 @@ static void R_DecalNodeSurfaces( model_t *model, mnode_t *node, decalinfo_t *dec
 //-----------------------------------------------------------------------------
 static void R_DecalNode( model_t *model, mnode_t *node, decalinfo_t *decalinfo )
 {
-	mplane_t	*splitplane;
-	float	dist;
-	mnode_t *children[2];
-
-	Assert( node != NULL );
+	mplane_t *splitplane;
+	float dist;
 
 	if( node->contents < 0 )
 	{
@@ -711,31 +708,22 @@ static void R_DecalNode( model_t *model, mnode_t *node, decalinfo_t *decalinfo )
 
 	splitplane = node->plane;
 	dist = DotProduct( decalinfo->m_Position, splitplane->normal ) - splitplane->dist;
-	node_children( children, node, model );
 
-	// This is arbitrarily set to 10 right now. In an ideal world we'd have the
-	// exact surface but we don't so, this tells me which planes are "sort of
-	// close" to the gunshot -- the gunshot is actually 4 units in front of the
-	// wall (see dlls\weapons.cpp). We also need to check to see if the decal
-	// actually intersects the texture space of the surface, as this method tags
-	// parallel surfaces in the same node always.
-	// JAY: This still tags faces that aren't correct at edges because we don't
-	// have a surface normal
 	if( dist > decalinfo->m_Size )
 	{
-		R_DecalNode( model, children[0], decalinfo );
+		R_DecalNode( model, node_child( node, 0, model ), decalinfo );
 	}
 	else if( dist < -decalinfo->m_Size )
 	{
-		R_DecalNode( model, children[1], decalinfo );
+		R_DecalNode( model, node_child( node, 1, model ), decalinfo );
 	}
 	else
 	{
 		if( dist < DECAL_DISTANCE && dist > -DECAL_DISTANCE )
 			R_DecalNodeSurfaces( model, node, decalinfo );
 
-		R_DecalNode( model, children[0], decalinfo );
-		R_DecalNode( model, children[1], decalinfo );
+		R_DecalNode( model, node_child( node, 0, model ), decalinfo );
+		R_DecalNode( model, node_child( node, 1, model ), decalinfo );
 	}
 }
 
@@ -880,6 +868,10 @@ void DrawSingleDecal( decal_t *pDecal, msurface_t *fa )
 
 	GL_Bind( XASH_TEXTURE0, pDecal->texture );
 
+	if( FBitSet( R_GetTexture( pDecal->texture )->flags, TF_PREMULTIPLIED ))
+		pglBlendFunc( GL_ONE, GL_ONE_MINUS_SRC_ALPHA );
+	else pglBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
+
 	pglBegin( GL_POLYGON );
 
 	for( i = 0; i < numVerts; i++, v += VERTEXSIZE )
@@ -919,10 +911,7 @@ void DrawSurfaceDecals( msurface_t *fa, qboolean single, qboolean reverse )
 			GL_Cull( GL_NONE );
 
 		if( gl_polyoffset.value )
-		{
-			pglEnable( GL_POLYGON_OFFSET_FILL );
-			pglPolygonOffset( -1.0f, -gl_polyoffset.value );
-		}
+			GL_PushPolygonOffset( -1.0f, -gl_polyoffset.value );
 	}
 
 	if( FBitSet( fa->flags, SURF_TRANSPARENT ) && glState.stencilEnabled )
@@ -1012,7 +1001,7 @@ void DrawSurfaceDecals( msurface_t *fa, qboolean single, qboolean reverse )
 		}
 
 		if( gl_polyoffset.value )
-			pglDisable( GL_POLYGON_OFFSET_FILL );
+			GL_PopPolygonOffset();
 
 		if( e->curstate.rendermode == kRenderTransTexture || e->curstate.rendermode == kRenderTransAdd )
 			GL_Cull( GL_FRONT );
@@ -1030,8 +1019,8 @@ void DrawSurfaceDecals( msurface_t *fa, qboolean single, qboolean reverse )
 
 void DrawDecalsBatch( void )
 {
-	cl_entity_t	*e;
-	int		i;
+	cl_entity_t *e;
+	int i;
 
 	if( !tr.num_draw_decals )
 		return;
@@ -1050,10 +1039,7 @@ void DrawDecalsBatch( void )
 		GL_Cull( GL_NONE );
 
 	if( gl_polyoffset.value )
-	{
-		pglEnable( GL_POLYGON_OFFSET_FILL );
-		pglPolygonOffset( -1.0f, -gl_polyoffset.value );
-	}
+		GL_PushPolygonOffset( -1.0f, -gl_polyoffset.value );
 
 	for( i = 0; i < tr.num_draw_decals; i++ )
 	{
@@ -1068,7 +1054,7 @@ void DrawDecalsBatch( void )
 	}
 
 	if( gl_polyoffset.value )
-		pglDisable( GL_POLYGON_OFFSET_FILL );
+		GL_PopPolygonOffset();
 
 	if( e->curstate.rendermode == kRenderTransTexture || e->curstate.rendermode == kRenderTransAdd )
 		GL_Cull( GL_FRONT );
@@ -1217,7 +1203,7 @@ void R_DecalRemoveAll( int textureIndex )
 		pdecal = &gDecalPool[i];
 
 		// don't remove permanent decals
-		if( !textureIndex && FBitSet( pdecal->flags, FDECAL_PERMANENT ))
+		if( FBitSet( pdecal->flags, FDECAL_PERMANENT ))
 			continue;
 
 		if( !textureIndex || ( pdecal->texture == textureIndex ))

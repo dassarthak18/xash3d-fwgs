@@ -33,39 +33,6 @@ void R_GetTextureParms( int *w, int *h, int texnum )
 
 /*
 =============
-R_GetSpriteParms
-
-same as GetImageParms but used
-for sprite models
-=============
-*/
-void GAME_EXPORT R_GetSpriteParms( int *frameWidth, int *frameHeight, int *numFrames, int currentFrame, const model_t *pSprite )
-{
-	mspriteframe_t *pFrame;
-
-	if( !pSprite || pSprite->type != mod_sprite )
-		return;                                       // bad model ?
-	pFrame = R_GetSpriteFrame( pSprite, currentFrame, 0.0f );
-
-	if( frameWidth )
-		*frameWidth = pFrame->width;
-	if( frameHeight )
-		*frameHeight = pFrame->height;
-	if( numFrames )
-		*numFrames = pSprite->numframes;
-}
-
-int GAME_EXPORT R_GetSpriteTexture( const model_t *m_pSpriteModel, int frame )
-{
-	if( !m_pSpriteModel || m_pSpriteModel->type != mod_sprite || !m_pSpriteModel->cache.data )
-		return 0;
-
-	return R_GetSpriteFrame( m_pSpriteModel, frame, 0.0f )->gl_texturenum;
-}
-
-
-/*
-=============
 Draw_StretchPicImplementation
 =============
 */
@@ -252,39 +219,11 @@ void Draw_Fill( int x, int y, int w, int h )
 
 /*
 =============
-R_DrawStretchRaw
+GL_UpdateTexture
 =============
 */
-void GAME_EXPORT R_DrawStretchRaw( float x, float y, float w, float h, int cols, int rows, const byte *data, qboolean dirty )
+void GAME_EXPORT GL_UpdateTexture( int texnum, int cols, int rows, int width, int height, const byte *buffer, pixformat_t fmt )
 {
-	byte    *raw = NULL;
-	image_t *tex;
-
-	raw = (byte *)data;
-
-	// pglDisable( GL_BLEND );
-	// pglDisable( GL_ALPHA_TEST );
-	// pglTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE );
-
-	tex = R_GetTexture( tr.cinTexture );
-	GL_Bind( XASH_TEXTURE0, tr.cinTexture );
-}
-
-/*
-=============
-R_UploadStretchRaw
-=============
-*/
-void GAME_EXPORT R_UploadStretchRaw( int texture, int cols, int rows, int width, int height, const byte *data )
-{
-	byte    *raw = NULL;
-	image_t *tex;
-	raw = (byte *)data;
-
-	tex = R_GetTexture( texture );
-	GL_Bind( GL_KEEP_UNIT, texture );
-	tex->width = cols;
-	tex->height = rows;
 }
 
 /*

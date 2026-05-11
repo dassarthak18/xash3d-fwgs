@@ -33,6 +33,7 @@ static CVAR_DEFINE_AUTO( con_fontnum, "-1", FCVAR_ARCHIVE, "console font number 
 static CVAR_DEFINE_AUTO( con_color, "240 180 24", FCVAR_ARCHIVE, "set a custom console color" );
 static CVAR_DEFINE_AUTO( scr_drawversion, "1", FCVAR_ARCHIVE, "draw version in menu or screenshots, doesn't affect console" );
 static CVAR_DEFINE_AUTO( con_oldfont, "0", 0, "use legacy font from gfx.wad, might be missing or broken" );
+static CVAR_DEFINE_AUTO( con_showcompletion, "1", FCVAR_ARCHIVE, "perform simplified autocompletion while typing" );
 
 static int g_codepage = 0;
 
@@ -130,6 +131,7 @@ typedef struct
 
 	// console input
 	field_t		input;
+	field_t		input_completion;
 
 	// chatfiled
 	field_t		chat;
@@ -141,9 +143,6 @@ typedef struct
 
 	notify_t		notify[MAX_DBG_NOTIFY]; // for Con_NXPrintf
 	qboolean		draw_notify;	// true if we have NXPrint message
-
-	// console update
-	double		lastupdate;
 } console_t;
 
 static console_t		con;
@@ -154,6 +153,16 @@ static void Con_InvalidateFonts( void );
 
 static void Con_LoadHistory( con_history_t *self );
 static void Con_SaveHistory( con_history_t *self );
+
+/*
+================
+Con_BackgroundMapActive
+================
+*/
+qboolean Con_BackgroundMapActive( void )
+{
+	return sv_background.value != 0.0f || cl.background;
+}
 
 /*
 ================
@@ -264,8 +273,8 @@ void Con_ToggleConsole_f( void )
 
 	SCR_EndLoadingPlaque();
 
-	// show console only in game or by special call from menu
-	if( cls.state != ca_active || cls.key_dest == key_menu )
+	// show console only in game, from menu, or to close console
+	if( cls.state != ca_active && cls.key_dest != key_menu && cls.key_dest != key_console )
 		return;
 
 	Con_ClearTyping();
@@ -273,13 +282,23 @@ void Con_ToggleConsole_f( void )
 
 	if( cls.key_dest == key_console )
 	{
-		if( Cvar_VariableInteger( "sv_background" ) || Cvar_VariableInteger( "cl_background" ))
+		// closing console
+		if( cls.state != ca_active || Con_BackgroundMapActive( ))
+		{
+			// not in game or in background mode - return to menu
+			// UI_SetActiveMenu(true) reactivates menu without resetting history
 			UI_SetActiveMenu( true );
-		else UI_SetActiveMenu( false );
+		}
+		else
+		{
+			// in game - return to game
+			UI_SetActiveMenu( false );
+		}
 	}
 	else
 	{
-		UI_SetActiveMenu( false );
+		// opening console - just switch key_dest, don't call UI_SetActiveMenu
+		// which would reset menu state via on_menu_hide()
 		Key_SetKeyDest( key_console );
 	}
 }
@@ -789,6 +808,7 @@ void Con_Init( void )
 	Cvar_RegisterVariable( &con_color );
 	Cvar_RegisterVariable( &scr_drawversion );
 	Cvar_RegisterVariable( &con_oldfont );
+	Cvar_RegisterVariable( &con_showcompletion );
 
 	// init the console buffer
 	con.bufsize = CON_TEXTSIZE;
@@ -945,13 +965,6 @@ void Con_Print( const char *txt )
 			lastlength = 0;
 			bufpos = 0;
 			charpos = 0;
-		}
-
-		// pump messages to avoid window hanging
-		if( con.lastupdate < Sys_DoubleTime( ))
-		{
-			con.lastupdate = Sys_DoubleTime() + 1.0;
-			Host_InputFrame();
 		}
 
 		// FIXME: disable updating screen, because when texture is bound any console print
@@ -1271,36 +1284,34 @@ static void Field_CharEvent( field_t *edit, int ch )
 Field_DrawInputLine
 ==================
 */
-static void Field_DrawInputLine( int x, int y, const field_t *edit )
+static int Field_DrawInputLine( int x, int y, const field_t *edit, byte alpha, qboolean cursor )
 {
 	int curPos;
 	char str[MAX_SYSPATH];
-	const byte *colorDefault = g_color_table[ColorIndex( COLOR_DEFAULT )];
+	rgba_t colorDefault;
 	const int prestep = bound( 0, edit->scroll, sizeof( edit->buffer ) - 1 );
 	const int drawLen = bound( 0, edit->widthInChars, sizeof( str ));
 	const int cursorCharPos = bound( 0, edit->cursor - prestep, sizeof( str ));
 
-	str[0] = 0;
+	memcpy( colorDefault, g_color_table[ColorIndex( COLOR_DEFAULT )], 3 * sizeof( colorDefault[0] ));
+	colorDefault[3] = alpha;
+
 	Q_strncpy( str, edit->buffer + prestep, drawLen );
 
 	// draw it
 	CL_DrawString( x, y, str, colorDefault, con.curFont, FONT_DRAW_UTF8 );
 
-	// draw the cursor
-	if((int)( host.realtime * 4 ) & 1 ) return; // off blink
-
 	// calc cursor position
 	str[cursorCharPos] = 0;
 	CL_DrawStringLen( con.curFont, str, &curPos, NULL, FONT_DRAW_UTF8 );
 
-	if( host.key_overstrike )
-	{
-		CL_DrawCharacter( x + curPos, y, '|', colorDefault, con.curFont, 0 );
-	}
-	else
-	{
-		CL_DrawCharacter( x + curPos, y, '_', colorDefault, con.curFont, 0 );
-	}
+	// draw the cursor
+	if( !cursor || (int)( host.realtime * 4 ) & 1 )
+		return curPos; // off blink
+
+	CL_DrawCharacter( x + curPos, y, host.key_overstrike ? '|' : '_', colorDefault, con.curFont, 0 );
+
+	return curPos;
 }
 
 /*
@@ -1461,6 +1472,12 @@ static void Con_SaveHistory( con_history_t *self )
 
 	f = FS_Open( "console_history.txt", "wb", true );
 
+	if( !f )
+	{
+		Con_Printf( S_ERROR "%s: can't open %s for write\n", __func__, "console_history.txt" );
+		return;
+	}
+
 	for( i = historyStart; i < self->next; i++ )
 	{
 		const char *s = self->lines[i % CON_HISTORY].buffer;
@@ -1483,6 +1500,17 @@ CONSOLE LINE EDITING
 
 =============================================================================
 */
+static void Con_InputCompletion( void )
+{
+	if( !con_showcompletion.value )
+		return;
+
+	// keep a copy of console input
+	con.input_completion = con.input;
+
+	Con_CompleteCommand( &con.input_completion, false );
+}
+
 /*
 ====================
 Key_Console
@@ -1497,8 +1525,12 @@ void Key_Console( int key )
 	if( key == K_BACK_BUTTON || key == K_START_BUTTON || key == K_ESCAPE )
 	{
 		if( cls.state == ca_active && !cl.background )
+		{
+			UI_SetActiveMenu( false ); // we are in game, prevent menu from drawing
 			Key_SetKeyDest( key_game );
-		else UI_SetActiveMenu( true );
+		}
+		else
+			UI_SetActiveMenu( true );
 		return;
 	}
 
@@ -1530,6 +1562,7 @@ void Key_Console( int key )
 		Con_ClearField( &con.input );
 		con.input.widthInChars = con.linewidth;
 		Con_Bottom();
+		Con_ClearField( &con.input_completion );
 
 		if( cls.state == ca_disconnected )
 		{
@@ -1540,10 +1573,11 @@ void Key_Console( int key )
 	}
 
 	// command completion
-	if( key == K_TAB || key == K_L2_BUTTON )
+	if( key == K_TAB || key == K_L2_BUTTON || key == K_LTRIGGER )
 	{
-		Con_CompleteCommand( &con.input );
+		Con_CompleteCommand( &con.input, true );
 		Con_Bottom();
+		Con_ClearField( &con.input_completion );
 		return;
 	}
 
@@ -1551,12 +1585,14 @@ void Key_Console( int key )
 	if(( key == K_MWHEELUP && Key_IsDown( K_SHIFT )) || ( key == K_UPARROW ) || (( Q_tolower(key) == 'p' ) && Key_IsDown( K_CTRL )))
 	{
 		Con_HistoryUp( &con.history, &con.input );
+		Con_InputCompletion();
 		return;
 	}
 
 	if(( key == K_MWHEELDOWN && Key_IsDown( K_SHIFT )) || ( key == K_DOWNARROW ) || (( Q_tolower(key) == 'n' ) && Key_IsDown( K_CTRL )))
 	{
 		Con_HistoryDown( &con.history, &con.input );
+		Con_InputCompletion();
 		return;
 	}
 
@@ -1612,6 +1648,7 @@ void Key_Console( int key )
 
 	// pass to the normal editline routine
 	Field_KeyDownEvent( &con.input, key );
+	Con_InputCompletion();
 }
 
 /*
@@ -1667,7 +1704,7 @@ The input line scrolls horizontally if typing goes beyond the right edge
 */
 static void Con_DrawInput( int lines )
 {
-	int	y;
+	int x, y;
 
 	// don't draw anything (always draw if not active)
 	if( cls.key_dest != key_console || !con.curFont )
@@ -1675,7 +1712,26 @@ static void Con_DrawInput( int lines )
 
 	y = lines - ( con.curFont->charHeight * 2 );
 	CL_DrawCharacter( con.curFont->charWidths[' '], y, ']', g_color_table[7], con.curFont, 0 );
-	Field_DrawInputLine(  con.curFont->charWidths[' ']*2, y, &con.input );
+	x = Field_DrawInputLine( con.curFont->charWidths[' ']*2, y, &con.input, 255, true );
+
+	// HACKHACK: avoid rendering issues when scroll != 0
+	if( con_showcompletion.value && con.input.scroll == 0 )
+	{
+		int len = Q_strlen( con.input.buffer );
+
+		if( FBitSet( con_showcompletion.flags, FCVAR_CHANGED ))
+		{
+			Con_InputCompletion();
+			ClearBits( con_showcompletion.flags, FCVAR_CHANGED );
+		}
+
+		// Con_CompleteCommand destroys the buffer. Need to figure out how to make it append only
+		if( Q_strlen(con.input_completion.buffer) > len && !Q_strncmp( con.input.buffer, con.input_completion.buffer, len ))
+		{
+			con.input_completion.scroll = len;
+			Field_DrawInputLine( con.curFont->charWidths[' ']*2 + x, y, &con.input_completion, 128, false );
+		}
+	}
 }
 
 /*
@@ -1740,7 +1796,7 @@ void Con_DrawDebug( void )
 	{
 		int length;
 		Q_snprintf( dlstring, sizeof( dlstring ), "Downloading [%d remaining]: ^2%s^7 %5.1f%% time %.f secs",
-			host.downloadcount, host.downloadfile, scr_download.value, Sys_DoubleTime() - timeStart );
+			host.downloadcount, host.downloadfile, scr_download.value, Platform_DoubleTime() - timeStart );
 
 		Con_DrawStringLen( dlstring, &length, NULL );
 		length = Q_max( length, 300 );
@@ -1753,7 +1809,7 @@ void Con_DrawDebug( void )
 		timeStart = host.realtime;
 	}
 
-	if( !host.allow_console || Cvar_VariableInteger( "cl_background" ) || Cvar_VariableInteger( "sv_background" ))
+	if( !host.allow_console || Con_BackgroundMapActive( ))
 		return;
 
 	if( con.draw_notify && !Con_Visible( ))
@@ -1779,7 +1835,7 @@ static void Con_DrawNotify( void )
 
 	x = con.curFont->charWidths[' ']; // offset one space at left screen side
 
-	if( host.allow_console && ( !Cvar_VariableInteger( "cl_background" ) && !Cvar_VariableInteger( "sv_background" )))
+	if( host.allow_console && !Con_BackgroundMapActive( ))
 	{
 		for( i = Q_max( 0, CON_LINES_COUNT - con.num_times ); i < CON_LINES_COUNT; i++ )
 		{
@@ -1807,7 +1863,7 @@ static void Con_DrawNotify( void )
 		Con_DrawStringLen( buf, &len, NULL );
 		Con_DrawString( x, y, buf, g_color_table[7] );
 
-		Field_DrawInputLine( x + len, y, &con.chat );
+		Field_DrawInputLine( x + len, y, &con.chat, 255, true );
 	}
 
 	ref.dllFuncs.Color4ub( 255, 255, 255, 255 );
@@ -1892,7 +1948,7 @@ static void Con_DrawSolidConsole( int lines )
 	ref.dllFuncs.GL_SetRenderMode( kRenderNormal );
 	ref.dllFuncs.Color4ub( 255, 255, 255, 255 ); // to prevent grab color from screenfade
 	if( refState.width * 3 / 4 < refState.height && lines >= refState.height )
-		ref.dllFuncs.R_DrawStretchPic( 0, lines - refState.height, refState.width, refState.height - refState.width * 3 / 4, 0, 0, 1, 1, R_GetBuiltinTexture( REF_BLACK_TEXTURE) );
+		ref.dllFuncs.R_DrawStretchPic( 0, lines - refState.height, refState.width, refState.height - refState.width * 3 / 4, 0, 0, 1, 1, R_GetBuiltinTexture( REF_BLACK_TEXTURE ));
 	ref.dllFuncs.R_DrawStretchPic( 0, lines - refState.width * 3 / 4, refState.width, refState.width * 3 / 4, 0, 0, 1, 1, con.background );
 
 	if( !con.curFont || !host.allow_console )
@@ -1925,8 +1981,9 @@ static void Con_DrawSolidConsole( int lines )
 			start = con.curFont->charWidths[' ']; // offset one space at left screen side
 
 			// draw red arrows to show the buffer is backscrolled
+			CL_SetFontColor( con.curFont, g_color_table[1] );
 			for( x = 0; x < con.linewidth; x += 4 )
-				CL_DrawCharacter( ( x + 1 ) * start, y, '^', g_color_table[1], con.curFont, 0 );
+				CL_DrawCharacter( ( x + 1 ) * start, y, '^', NULL, con.curFont, FONT_DRAW_NOCOLOR );
 			y -= con.curFont->charHeight;
 		}
 		x = lastline;
@@ -1969,7 +2026,7 @@ void Con_DrawConsole( void )
 	{
 		if( !cl_allow_levelshots.value && !cls.timedemo )
 		{
-			if( cls.key_dest != key_console && ( Cvar_VariableInteger( "cl_background" ) || Cvar_VariableInteger( "sv_background" )))
+			if( cls.key_dest != key_console && Con_BackgroundMapActive( ))
 				con.vislines = con.showlines = 0;
 			else con.vislines = con.showlines = refState.height;
 		}
@@ -2000,7 +2057,7 @@ void Con_DrawConsole( void )
 		break;
 	case ca_active:
 	case ca_cinematic:
-		if( Cvar_VariableInteger( "cl_background" ) || Cvar_VariableInteger( "sv_background" ))
+		if( Con_BackgroundMapActive( ))
 		{
 			if( cls.key_dest == key_console )
 				Con_DrawSolidConsole( refState.height );
@@ -2107,8 +2164,11 @@ void Con_RunConsole( void )
 			con.vislines = con.showlines;
 	}
 
-	if( FBitSet( con_charset.flags|con_fontscale.flags|con_fontnum.flags|cl_charset.flags|con_oldfont.flags,  FCVAR_CHANGED ))
+	if( FBitSet( con_charset.flags|con_fontscale.flags|con_fontnum.flags|cl_charset.flags|con_oldfont.flags, FCVAR_CHANGED ))
 	{
+		if( con_fontscale.value < 1.0f )
+			Cvar_DirectSet( &con_fontscale, "1" );
+		
 		// update codepage parameters
 		if( !Q_stricmp( con_charset.string, "cp1251" ))
 		{
@@ -2154,6 +2214,7 @@ void Con_CharEvent( int key )
 	if( cls.key_dest == key_console )
 	{
 		Field_CharEvent( &con.input, key );
+		Con_InputCompletion();
 	}
 	else if( cls.key_dest == key_message )
 	{

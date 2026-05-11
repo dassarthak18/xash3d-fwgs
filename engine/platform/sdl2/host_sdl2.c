@@ -72,6 +72,7 @@ static void SDLash_KeyEvent( SDL_KeyboardEvent key )
 	DECLARE_KEY_RANGE( SDL_SCANCODE_A, SDL_SCANCODE_Z, 'a' )
 	else DECLARE_KEY_RANGE( SDL_SCANCODE_1, SDL_SCANCODE_9, '1' )
 	else DECLARE_KEY_RANGE( SDL_SCANCODE_F1, SDL_SCANCODE_F12, K_F1 )
+	else DECLARE_KEY_RANGE( SDL_SCANCODE_INTERNATIONAL1, SDL_SCANCODE_INTERNATIONAL9, K_INTERNATIONAL )
 	else
 	{
 		qboolean numLock = FBitSet( SDL_GetModState(), KMOD_NUM );
@@ -247,13 +248,6 @@ static void SDLash_ActiveEvent( int gain )
 	}
 	else
 	{
-#if TARGET_OS_IPHONE
-		{
-			// Keep running if ftp server enabled
-			void IOS_StartBackgroundTask( void );
-			IOS_StartBackgroundTask();
-		}
-#endif
 		host.status = HOST_NOFOCUS;
 
 		if( cls.key_dest == key_game )
@@ -263,7 +257,7 @@ static void SDLash_ActiveEvent( int gain )
 		}
 
 		host.force_draw_version_time = host.realtime + 2.0;
-		VID_RestoreScreenResolution();
+		VID_RestoreScreenResolution( (window_mode_t)vid_fullscreen.value );
 	}
 }
 
@@ -374,6 +368,11 @@ static void SDLash_EventHandler( SDL_Event *event )
 #endif
 		SDLash_HandleGameControllerEvent( event );
 		break;
+#if SDL_VERSION_ATLEAST( 2, 0, 14 )
+	case SDL_SENSORUPDATE:
+		SDLash_SensorUpdate( event->sensor );
+		break;
+#endif
 
 	case SDL_WINDOWEVENT:
 		if( event->window.windowID != SDL_GetWindowID( host.hWnd ) )
@@ -385,23 +384,13 @@ static void SDLash_EventHandler( SDL_Event *event )
 		switch( event->window.event )
 		{
 		case SDL_WINDOWEVENT_MOVED:
-		{
-			char val[32];
-
-			Q_snprintf( val, sizeof( val ), "%d", event->window.data1 );
-			Cvar_DirectSet( &window_xpos, val );
-
-			Q_snprintf( val, sizeof( val ), "%d", event->window.data2 );
-			Cvar_DirectSet( &window_ypos, val );
-
-			if ( vid_fullscreen.value == WINDOW_MODE_WINDOWED )
+			if( vid_fullscreen.value == WINDOW_MODE_WINDOWED )
 				Cvar_DirectSet( &vid_maximized, "0" );
 			break;
-		}
 		case SDL_WINDOWEVENT_MINIMIZED:
 			host.status = HOST_SLEEP;
 			Cvar_DirectSet( &vid_maximized, "0" );
-			VID_RestoreScreenResolution( );
+			VID_RestoreScreenResolution( (window_mode_t)vid_fullscreen.value );
 			break;
 		case SDL_WINDOWEVENT_RESTORED:
 			host.status = HOST_FRAME;
@@ -417,14 +406,7 @@ static void SDLash_EventHandler( SDL_Event *event )
 			SDLash_ActiveEvent( false );
 			break;
 		case SDL_WINDOWEVENT_RESIZED:
-#if !XASH_MOBILE_PLATFORM
-			if( vid_fullscreen.value == WINDOW_MODE_WINDOWED )
-#endif
-			{
-				SDL_Window *wnd = SDL_GetWindowFromID( event->window.windowID );
-				VID_SaveWindowSize( event->window.data1, event->window.data2,
-					FBitSet( SDL_GetWindowFlags( wnd ), SDL_WINDOW_MAXIMIZED ) != 0 );
-			}
+			VID_SaveWindowSize( event->window.data1, event->window.data2 );
 			break;
 		case SDL_WINDOWEVENT_MAXIMIZED:
 			Cvar_DirectSet( &vid_maximized, "1" );

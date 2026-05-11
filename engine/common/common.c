@@ -227,7 +227,7 @@ qboolean LZSS_IsCompressed( const byte *source, size_t input_len )
 
 	phdr = (const lzss_header_t *)source;
 
-	if( phdr && phdr->id == LZSS_ID )
+	if( phdr && phdr->id == LittleLong( LZSS_ID ))
 		return true;
 	return false;
 }
@@ -241,8 +241,8 @@ uint LZSS_GetActualSize( const byte *source, size_t input_len )
 
 	phdr = (const lzss_header_t *)source;
 
-	if( phdr && phdr->id == LZSS_ID )
-		return phdr->size;
+	if( phdr && phdr->id == LittleLong( LZSS_ID ))
+		return LittleLong( phdr->size );
 
 	return 0;
 }
@@ -296,8 +296,8 @@ static byte *LZSS_CompressNoAlloc( lzss_state_t *state, byte *pInput, int input_
 		return NULL;
 
 	// set LZSS header
-	header->id = LZSS_ID;
-	header->size = input_length;
+	header->id = LittleLong( LZSS_ID );
+	header->size = LittleLong( input_length );
 
 	// create the compression work buffers, small enough (~64K) for stack
 	state->hash_table = (lzss_list_t *)alloca( 256 * sizeof( lzss_list_t ));
@@ -497,21 +497,6 @@ uint LZSS_Decompress( const byte *pInput, byte *pOutput, size_t input_len, size_
 }
 
 /*
-==============
-COM_IsWhiteSpace
-
-interpret symbol as whitespace
-==============
-*/
-
-static int COM_IsWhiteSpace( char space )
-{
-	if( space == ' ' || space == '\t' || space == '\r' || space == '\n' )
-		return 1;
-	return 0;
-}
-
-/*
 ================
 COM_ParseVector
 
@@ -573,39 +558,6 @@ int GAME_EXPORT COM_FileSize( const char *filename )
 }
 
 /*
-=============
-COM_TrimSpace
-
-trims all whitespace from the front
-and end of a string
-=============
-*/
-void COM_TrimSpace( const char *source, char *dest )
-{
-	int	start, end, length;
-
-	start = 0;
-	end = Q_strlen( source );
-
-	while( source[start] && COM_IsWhiteSpace( source[start] ))
-		start++;
-	end--;
-
-	while( end > 0 && COM_IsWhiteSpace( source[end] ))
-		end--;
-	end++;
-
-	length = end - start;
-
-	if( length > 0 )
-		memcpy( dest, source + start, length );
-	else length = 0;
-
-	// terminate the dest string
-	dest[length] = 0;
-}
-
-/*
 ==================
 COM_Nibble
 
@@ -645,84 +597,12 @@ void COM_HexConvert( const char *pszInput, int nInputLength, byte *pOutput )
 	byte		*p = pOutput;
 	int		i;
 
-
 	for( i = 0; i < nInputLength; i += 2 )
 	{
 		pIn = &pszInput[i];
 		*p = COM_Nibble( pIn[0] ) << 4 | COM_Nibble( pIn[1] );
 		p++;
 	}
-}
-
-/*
-=============
-COM_MemFgets
-
-=============
-*/
-char *GAME_EXPORT COM_MemFgets( byte *pMemFile, int fileSize, int *filePos, char *pBuffer, int bufferSize )
-{
-	int	i, last, stop;
-
-	if( !pMemFile || !pBuffer || !filePos )
-		return NULL;
-
-	if( *filePos >= fileSize )
-		return NULL;
-
-	i = *filePos;
-	last = fileSize;
-
-	// fgets always NULL terminates, so only read bufferSize-1 characters
-	if( last - *filePos > ( bufferSize - 1 ))
-		last = *filePos + ( bufferSize - 1);
-
-	stop = 0;
-
-	// stop at the next newline (inclusive) or end of buffer
-	while( i < last && !stop )
-	{
-		if( pMemFile[i] == '\n' )
-			stop = 1;
-		i++;
-	}
-
-	// if we actually advanced the pointer, copy it over
-	if( i != *filePos )
-	{
-		// we read in size bytes
-		int	size = i - *filePos;
-
-		// copy it out
-		memcpy( pBuffer, pMemFile + *filePos, size );
-
-		// If the buffer isn't full, terminate (this is always true)
-		if( size < bufferSize ) pBuffer[size] = 0;
-
-		// update file pointer
-		*filePos = i;
-		return pBuffer;
-	}
-
-	return NULL;
-}
-
-/*
-====================
-Cache_Check
-
-consistency check
-====================
-*/
-void *GAME_EXPORT Cache_Check( poolhandle_t mempool, cache_user_t *c )
-{
-	if( !c->data )
-		return NULL;
-
-	if( !Mem_IsAllocatedExt( mempool, c->data ))
-		return NULL;
-
-	return c->data;
 }
 
 /*
@@ -737,7 +617,7 @@ byte *GAME_EXPORT COM_LoadFileForMe( const char *filename, int *pLength )
 	byte	*pfile;
 	fs_offset_t	iLength;
 
-	if( !COM_CheckString( filename ))
+	if( COM_StringEmptyOrNULL( filename ))
 	{
 		if( pLength )
 			*pLength = 0;
@@ -773,7 +653,7 @@ COM_SaveFile
 int GAME_EXPORT COM_SaveFile( const char *filename, const void *data, int len )
 {
 	// check for empty filename
-	if( !COM_CheckString( filename ))
+	if( COM_StringEmptyOrNULL( filename ))
 		return false;
 
 	// check for null data
@@ -886,17 +766,6 @@ int GAME_EXPORT COM_CheckParm( char *parm, char **ppnext )
 	return i;
 }
 
-/*
-=============
-pfnTime
-
-=============
-*/
-float GAME_EXPORT pfnTime( void )
-{
-	return (float)Sys_DoubleTime();
-}
-
 qboolean COM_IsSafeFileToDownload( const char *filename )
 {
 	char		lwrfilename[4096];
@@ -905,7 +774,7 @@ qboolean COM_IsSafeFileToDownload( const char *filename )
 	size_t	len;
 	int		i;
 
-	if( !COM_CheckString( filename ))
+	if( COM_StringEmptyOrNULL( filename ))
 		return false;
 
 	ext = COM_FileExtension( filename );
@@ -914,7 +783,7 @@ qboolean COM_IsSafeFileToDownload( const char *filename )
 	// only allow extensionless files that start with !MD5
 	if( !Q_strncmp( filename, "!MD5", 4 ))
 	{
-		if( COM_CheckStringEmpty( ext ))
+		if( !COM_StringEmpty( ext ))
 			return false;
 
 		len = Q_strlen( filename );
@@ -1092,14 +961,14 @@ static void Test_LZSS( void )
 	};
 	const char decompressed[] = "Do you like what you see?";
 
-#ifdef USING_ASAN
+#ifdef USE_ASAN
 	ASAN_POISON_MEMORY_REGION( poison1, sizeof( poison1 ));
 	ASAN_POISON_MEMORY_REGION( poison2, sizeof( poison2 ));
 	ASAN_POISON_MEMORY_REGION( poison3, sizeof( poison3 ));
 #endif
 
-	hdr->size = sizeof( in ) - sizeof( *hdr );
-	hdr->id = LZSS_ID;
+	hdr->size = LittleLong( sizeof( in ) - sizeof( *hdr ));
+	hdr->id = LittleLong( LZSS_ID );
 
 	memset( in + sizeof( *hdr ), 0xff, sizeof( in ) - sizeof( *hdr ));
 	result = LZSS_Decompress( in, out, sizeof( in ), sizeof( out ));
@@ -1109,18 +978,18 @@ static void Test_LZSS( void )
 	result = LZSS_Decompress( in, out, sizeof( in ), sizeof( out ));
 	TASSERT_EQi( result, 0 );
 
-	hdr->size = 1;
-	hdr->id = LZSS_ID;
+	hdr->size = LittleLong( 1 );
+	hdr->id = LittleLong( LZSS_ID );
 	result = LZSS_Decompress( in, out, sizeof( in ), sizeof( out ));
 	TASSERT_EQi( result, 0 );
 
-	hdr->size = 999;
-	hdr->id = LZSS_ID;
+	hdr->size = LittleLong( 999 );
+	hdr->id = LittleLong( LZSS_ID );
 	result = LZSS_Decompress( in, out, sizeof( in ), sizeof( out ));
 	TASSERT_EQi( result, 0 );
 
-	hdr->size = sizeof( in ) - sizeof( *hdr );
-	hdr->id = 0xa1ba;
+	hdr->size = LittleLong( sizeof( in ) - sizeof( *hdr ));
+	hdr->id = LittleLong( 0xa1ba );
 	result = LZSS_Decompress( in, out, sizeof( in ), sizeof( out ));
 	TASSERT_EQi( result, 0 );
 

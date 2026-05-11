@@ -19,6 +19,7 @@ GNU General Public License for more details.
 #include "xash3d_mathlib.h"
 #include "ipv6text.h"
 #include "net_ws_private.h"
+#include "server.h" // sv_cheats
 
 #if XASH_SDL == 2
 #include <SDL_thread.h>
@@ -98,6 +99,7 @@ typedef struct
 	int		sequence_number;
 	int		ip_sockets[NS_COUNT];
 	int		ip6_sockets[NS_COUNT];
+	qboolean		rr_state[NS_COUNT];
 	qboolean		initialized;
 	qboolean		threads_initialized;
 	qboolean		configured;
@@ -131,7 +133,7 @@ static CVAR_DEFINE_AUTO( net6_address, "0", FCVAR_PRIVILEGED|FCVAR_READ_ONLY, "c
 
 static void NET_ClearLagData( qboolean bClient, qboolean bServer );
 
-static inline qboolean NET_IsSocketError( int retval )
+qboolean NET_IsSocketError( int retval )
 {
 #if XASH_WIN32 || XASH_DOS4GW
 	return retval == SOCKET_ERROR ? true : false;
@@ -140,13 +142,31 @@ static inline qboolean NET_IsSocketError( int retval )
 #endif
 }
 
-static inline qboolean NET_IsSocketValid( int socket )
+qboolean NET_IsSocketValid( int socket )
 {
 #if XASH_WIN32 || XASH_DOS4GW
 	return socket != INVALID_SOCKET;
 #else
 	return socket >= 0;
 #endif
+}
+
+qboolean NET_MakeSocketNonBlocking( int socket_fd )
+{
+#if XASH_LINUX
+	int res = fcntl( socket_fd, F_GETFL, 0 );
+	if( NET_IsSocketError( res ))
+		return false;
+
+	// SOCK_NONBLOCK is not portable, so use fcntl
+	if( NET_IsSocketError( fcntl( socket_fd, F_SETFL, res | O_NONBLOCK )))
+		return false;
+#else
+	uint mode = 1;
+	if( NET_IsSocketError( ioctlsocket( socket_fd, FIONBIO, (void*)&mode )))
+		return false;
+#endif
+	return true;
 }
 
 void NET_NetadrToIP6Bytes( uint8_t *ip6, const netadr_t *adr )
@@ -176,7 +196,7 @@ static int NET_NetadrIP6Compare( const netadr_t *a, const netadr_t *b )
 NET_NetadrToSockadr
 ====================
 */
-static void NET_NetadrToSockadr( netadr_t *a, struct sockaddr_storage *s )
+void NET_NetadrToSockadr( netadr_t *a, struct sockaddr_storage *s )
 {
 	netadrtype_t type = NET_NetadrType( a );
 
@@ -213,7 +233,7 @@ static void NET_NetadrToSockadr( netadr_t *a, struct sockaddr_storage *s )
 NET_SockadrToNetAdr
 ====================
 */
-static void NET_SockadrToNetadr( const struct sockaddr_storage *s, netadr_t *a )
+void NET_SockadrToNetadr( const struct sockaddr_storage *s, netadr_t *a )
 {
 	if( s->ss_family == AF_INET )
 	{
@@ -236,7 +256,6 @@ NET_GetHostByName
 */
 static qboolean NET_GetHostByName( const char *hostname, int family, struct sockaddr_storage *addr )
 {
-#if defined HAVE_GETADDRINFO
 	struct addrinfo *ai = NULL, *cur;
 	struct addrinfo hints;
 	qboolean ret = false;
@@ -266,29 +285,8 @@ static qboolean NET_GetHostByName( const char *hostname, int family, struct sock
 	}
 
 	return ret;
-#else
-	struct hostent *h;
-
-#if XASH_NO_IPV6_RESOLVE
-	if( family == AF_INET6 )
-		return false;
-#endif
-
-	if(!( h = gethostbyname( hostname )))
-		return false;
-
-	((struct sockaddr_in *)addr)->sin_family = AF_INET;
-	((struct sockaddr_in *)addr)->sin_addr = *(struct in_addr *)h->h_addr_list[0];
-
-	return true;
-#endif
 }
 
-#if !XASH_EMSCRIPTEN && !XASH_DOS4GW && !defined XASH_NO_ASYNC_NS_RESOLVE
-#define CAN_ASYNC_NS_RESOLVE
-#endif // !XASH_EMSCRIPTEN && !XASH_DOS4GW && !defined XASH_NO_ASYNC_NS_RESOLVE
-
-#ifdef CAN_ASYNC_NS_RESOLVE
 static void NET_ResolveThread( void );
 
 #if XASH_SDL == 2
@@ -379,11 +377,7 @@ static void NET_ResolveThread( void )
 
 	RESOLVE_DBG( "[resolve thread] starting resolve for " );
 	RESOLVE_DBG( nsthread.hostname );
-#ifdef HAVE_GETADDRINFO
 	RESOLVE_DBG( " with getaddrinfo\n" );
-#else
-	RESOLVE_DBG( " with gethostbyname\n" );
-#endif
 
 	if(( res = NET_GetHostByName( nsthread.hostname, nsthread.family, &addr )))
 		RESOLVE_DBG( "[resolve thread] success\n" );
@@ -397,8 +391,6 @@ static void NET_ResolveThread( void )
 	mutex_unlock( nsthread.mutexres );
 	RESOLVE_DBG( "[resolve thread] exiting thread\n" );
 }
-#endif // CAN_ASYNC_NS_RESOLVE
-
 
 /*
 =============
@@ -456,7 +448,6 @@ net_gai_state_t NET_StringToSockaddr( const char *s, struct sockaddr_storage *sa
 	{
 		qboolean asyncfailed = true;
 
-#ifdef CAN_ASYNC_NS_RESOLVE
 		if( net.threads_initialized && nonblocking )
 		{
 			mutex_lock( nsthread.mutexres );
@@ -498,7 +489,6 @@ net_gai_state_t NET_StringToSockaddr( const char *s, struct sockaddr_storage *sa
 
 			mutex_unlock( nsthread.mutexres );
 		}
-#endif // CAN_ASYNC_NS_RESOLVE
 
 		if( asyncfailed )
 			ret = NET_GetHostByName( copy, family, &temp );
@@ -536,7 +526,7 @@ qboolean NET_StringToFilterAdr( const char *s, netadr_t *adr, uint *prefixlen )
 	byte ip6[16];
 	uint len;
 
-	if( !COM_CheckStringEmpty( s ))
+	if( COM_StringEmpty( s ))
 		return false;
 
 	memset( adr, 0, sizeof( *adr ));
@@ -1139,7 +1129,7 @@ static void NET_AdjustLag( void )
 	dt = bound( 0.0, dt, 0.1 );
 	lasttime = host.realtime;
 
-	if( host_developer.value || !net_fakelag.value )
+	if(( host_developer.value && sv_cheats.value ) || !net_fakelag.value )
 	{
 		if( net_fakelag.value != net.fakelag )
 		{
@@ -1359,75 +1349,60 @@ NET_QueuePacket
 queue normal and lagged packets
 ==================
 */
-static qboolean NET_QueuePacket( netsrc_t sock, netadr_t *from, byte *data, size_t *length )
+static qboolean NET_QueuePacket( int net_socket, netsrc_t sock, netadr_t *from, byte *data, size_t *length )
 {
 	byte		buf[NET_MAX_FRAGMENT];
-	int		ret, protocol;
-	int		net_socket;
+	int		ret;
 	WSAsize_t	addr_len;
 	struct sockaddr_storage	addr = { 0 };
 
 	*length = 0;
 
-	for( protocol = 0; protocol < 2; protocol++ )
+	if( !NET_IsSocketValid( net_socket ))
+		return NET_LagPacket( false, sock, from, length, data );
+
+	addr_len = sizeof( addr );
+	ret = recvfrom( net_socket, buf, sizeof( buf ), 0, (struct sockaddr *)&addr, &addr_len );
+
+	NET_SockadrToNetadr( &addr, from );
+
+	if( !NET_IsSocketError( ret ))
 	{
-		switch( protocol )
+		if( ret < NET_MAX_FRAGMENT )
 		{
-		case 0: net_socket = net.ip_sockets[sock]; break;
-		case 1: net_socket = net.ip6_sockets[sock]; break;
-		}
+			// Transfer data
+			memcpy( data, buf, ret );
+			*length = ret;
 
-		if( !NET_IsSocketValid( net_socket ))
-			continue;
-
-		addr_len = sizeof( addr );
-		ret = recvfrom( net_socket, buf, sizeof( buf ), 0, (struct sockaddr *)&addr, &addr_len );
-
-		NET_SockadrToNetadr( &addr, from );
-
-		if( !NET_IsSocketError( ret ))
-		{
-			if( ret < NET_MAX_FRAGMENT )
-			{
-				// Transfer data
-				memcpy( data, buf, ret );
-				*length = ret;
 #if !XASH_DEDICATED
-				{
-					connprotocol_t proto = CL_Protocol();
-
-					if( proto == PROTO_LEGACY )
-						return NET_LagPacket( true, sock, from, length, data );
-
-					// check for split message
-					if( sock == NS_CLIENT && *(int *)data == NET_HEADER_SPLITPACKET )
-						return NET_GetLong( data, ret, length, CL_GetSplitSize( ), proto );
-				}
+			// check for split message
+			if( sock == NS_CLIENT && *(int *)data == NET_HEADER_SPLITPACKET )
+				return NET_GetLong( data, ret, length, CL_GetSplitSize( ), CL_Protocol( ));
 #endif
-				// lag the packet, if needed
-				return NET_LagPacket( true, sock, from, length, data );
-			}
-			else
-			{
-				Con_Reportf( "%s: oversize packet from %s\n", __func__, NET_AdrToString( *from ));
-			}
+
+			// lag the packet, if needed
+			return NET_LagPacket( true, sock, from, length, data );
 		}
 		else
 		{
-			int	err = WSAGetLastError();
+			Con_Reportf( "%s: oversize packet from %s\n", __func__, NET_AdrToString( *from ));
+		}
+	}
+	else
+	{
+		int	err = WSAGetLastError();
 
-			switch( err )
-			{
-			case WSAEWOULDBLOCK:
-			case WSAECONNRESET:
-			case WSAECONNREFUSED:
-			case WSAEMSGSIZE:
-			case WSAETIMEDOUT:
-				break;
-			default:	// let's continue even after errors
-				Con_DPrintf( S_ERROR "%s: %s from %s\n", __func__, NET_ErrorString(), NET_AdrToString( *from ));
-				break;
-			}
+		switch( err )
+		{
+		case WSAEWOULDBLOCK:
+		case WSAECONNRESET:
+		case WSAECONNREFUSED:
+		case WSAEMSGSIZE:
+		case WSAETIMEDOUT:
+			break;
+		default:	// let's continue even after errors
+			Con_DPrintf( S_ERROR "%s: %s from %s\n", __func__, NET_ErrorString(), NET_AdrToString( *from ));
+			break;
 		}
 	}
 
@@ -1454,7 +1429,20 @@ qboolean NET_GetPacket( netsrc_t sock, netadr_t *from, byte *data, size_t *lengt
 	}
 	else
 	{
-		return NET_QueuePacket( sock, from, data, length );
+		// Round-robin the socket to prevent constant activity on one starving the other.
+		int i = net.rr_state[sock];
+		int net_socket = i ? net.ip_sockets[sock] : net.ip6_sockets[sock];
+
+		if( NET_QueuePacket( net_socket, sock, from, data, length ))
+		{
+			net.rr_state[sock] = !i;
+			return true;
+		}
+
+		// try the other one before giving up
+		net_socket = i ? net.ip6_sockets[sock] : net.ip_sockets[sock];
+		net.rr_state[sock] = !i;
+		return NET_QueuePacket( net_socket, sock, from, data, length );
 	}
 }
 
@@ -1625,7 +1613,7 @@ static int NET_IPSocket( const char *net_iface, int port, int family )
 		return INVALID_SOCKET;
 	}
 
-	if( NET_IsSocketError( ioctlsocket( net_socket, FIONBIO, (void*)&_true )))
+	if( !NET_MakeSocketNonBlocking( net_socket ))
 	{
 		struct timeval timeout;
 
@@ -1665,7 +1653,7 @@ static int NET_IPSocket( const char *net_iface, int port, int family )
 				Con_DPrintf( S_WARN "%s: port %d setsockopt IPV6_MULTICAST_LOOP: %s\n", __func__, port, NET_ErrorString( ));
 		}
 
-		if( COM_CheckStringEmpty( net_iface ) && Q_stricmp( net_iface, "localhost" ))
+		if( !COM_StringEmpty( net_iface ) && Q_stricmp( net_iface, "localhost" ))
 			NET_StringToSockaddr( net_iface, &addr, false, AF_INET6 );
 		else ((struct sockaddr_in6 *)&addr)->sin6_addr = in6addr_any;
 
@@ -1702,7 +1690,7 @@ static int NET_IPSocket( const char *net_iface, int port, int family )
 				Con_DPrintf( S_WARN "%s: port %d setsockopt IP_MULTICAST_LOOP: %s\n", __func__, port, NET_ErrorString( ));
 		}
 
-		if( COM_CheckStringEmpty( net_iface ) && Q_stricmp( net_iface, "localhost" ))
+		if( !COM_StringEmpty( net_iface ) && Q_stricmp( net_iface, "localhost" ))
 			NET_StringToSockaddr( net_iface, &addr, false, AF_INET );
 		else ((struct sockaddr_in *)&addr)->sin_addr.s_addr = INADDR_ANY;
 
@@ -1942,55 +1930,12 @@ void NET_Config( qboolean multiplayer, qboolean changeport )
 
 /*
 ====================
-NET_IsConfigured
-
-Is winsock ip initialized?
-====================
-*/
-qboolean NET_IsConfigured( void )
-{
-	return net.configured;
-}
-
-/*
-====================
 NET_IsActive
 ====================
 */
 qboolean NET_IsActive( void )
 {
 	return net.initialized;
-}
-
-/*
-====================
-NET_Sleep
-
-sleeps msec or until net socket is ready
-====================
-*/
-void NET_Sleep( int msec )
-{
-#ifndef XASH_NO_NETWORK
-	struct timeval	timeout;
-	fd_set		fdset;
-	int		i = 0;
-
-	if( !net.initialized || host.type == HOST_NORMAL )
-		return; // we're not a dedicated server, just run full speed
-
-	FD_ZERO( &fdset );
-
-	if( net.ip_sockets[NS_SERVER] != INVALID_SOCKET )
-	{
-		FD_SET( net.ip_sockets[NS_SERVER], &fdset ); // network socket
-		i = net.ip_sockets[NS_SERVER];
-	}
-
-	timeout.tv_sec = msec / 1000;
-	timeout.tv_usec = (msec % 1000) * 1000;
-	select( i+1, &fdset, NULL, NULL, &timeout );
-#endif
 }
 
 /*
@@ -2071,6 +2016,7 @@ void NET_Init( void )
 		net.lagdata[i].next = &net.lagdata[i];
 		net.ip_sockets[i]  = INVALID_SOCKET;
 		net.ip6_sockets[i] = INVALID_SOCKET;
+		net.rr_state[i] = false;
 	}
 
 #if XASH_WIN32
@@ -2081,9 +2027,7 @@ void NET_Init( void )
 	}
 #endif
 
-#ifdef CAN_ASYNC_NS_RESOLVE
 	NET_InitializeCriticalSections();
-#endif
 
 	net.allow_ip = !Sys_CheckParm( "-noip" );
 	net.allow_ip6 = !Sys_CheckParm( "-noip6" );
@@ -2136,9 +2080,7 @@ void NET_Shutdown( void )
 
 	NET_Config( false, false );
 
-#ifdef CAN_ASYNC_NS_RESOLVE
 	NET_DeleteCriticalSections();
-#endif
 
 #if XASH_WIN32
 	WSACleanup();

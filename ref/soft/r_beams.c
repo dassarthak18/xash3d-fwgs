@@ -100,7 +100,7 @@ static void R_BeamComputeNormal( const vec3_t vStartPos, const vec3_t vNextPos, 
 	VectorSubtract( vStartPos, vNextPos, vTangentY );
 
 	// vDirToBeam = vector from viewer origin to beam
-	VectorSubtract( vStartPos, RI.vieworg, vDirToBeam );
+	VectorSubtract( vStartPos, RI.rvp.vieworigin, vDirToBeam );
 
 	// get a vector that is perpendicular to us and perpendicular to the beam.
 	// this is used to fatten the beam.
@@ -116,67 +116,11 @@ R_BeamCull
 Cull the beam by bbox
 ==============
 */
-qboolean GAME_EXPORT R_BeamCull( const vec3_t start, const vec3_t end, qboolean pvsOnly )
+static qboolean R_BeamCull( const vec3_t start, const vec3_t end, qboolean pvsOnly )
 {
-	vec3_t mins, maxs;
-	int    i;
+	// culling is undone in ref_soft
 	return false;
-/*
-	for( i = 0; i < 3; i++ )
-	{
-		if( start[i] < end[i] )
-		{
-			mins[i] = start[i];
-			maxs[i] = end[i];
-		}
-		else
-		{
-			mins[i] = end[i];
-			maxs[i] = start[i];
-		}
-
-		// don't let it be zero sized
-		if( mins[i] == maxs[i] )
-			maxs[i] += 1.0f;
-	}
-
-	// check bbox
-	if( gEngfuncs.Mod_BoxVisible( mins, maxs, Mod_GetCurrentVis( )))
-	{
-		if( pvsOnly || !R_CullBox( mins, maxs ))
-		{
-			// beam is visible
-			return false;
-		}
-	}
-
-	// beam is culled
-	return true;
-	*/
 }
-
-/*
-================
-CL_AddCustomBeam
-
-Add the beam that encoded as custom entity
-================
-*/
-void GAME_EXPORT CL_AddCustomBeam( cl_entity_t *pEnvBeam )
-{
-	if( tr.draw_list->num_beam_entities >= MAX_VISIBLE_PACKET )
-	{
-		gEngfuncs.Con_Printf( S_ERROR "Too many beams %d!\n", tr.draw_list->num_beam_entities );
-		return;
-	}
-
-	if( pEnvBeam )
-	{
-		tr.draw_list->beam_entities[tr.draw_list->num_beam_entities] = pEnvBeam;
-		tr.draw_list->num_beam_entities++;
-	}
-}
-
 
 /*
 ==============================================================
@@ -1056,7 +1000,7 @@ static void R_BeamDraw( BEAM *pbeam, float frametime )
 			float  flDistance;
 
 			// fade the beam if the player's not looking at the source
-			VectorSubtract( RI.vieworg, pbeam->source, localDir );
+			VectorSubtract( RI.rvp.vieworigin, pbeam->source, localDir );
 			flDot = DotProduct( delta, localDir );
 			VectorScale( delta, flDot, vecProjection );
 			VectorSubtract( localDir, vecProjection, tmp );

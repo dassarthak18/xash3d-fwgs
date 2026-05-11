@@ -19,7 +19,6 @@ GNU General Public License for more details.
 #include "triangleapi.h"
 #include "alias.h"
 #include "pm_local.h"
-#include "pmtrace.h"
 
 typedef struct
 {
@@ -338,7 +337,6 @@ Mod_CreateSkinData
 static rgbdata_t *Mod_CreateSkinData( model_t *mod, const byte *data, int width, int height )
 {
 	static rgbdata_t	skin;
-	char		name[MAX_QPATH];
 	int		i;
 
 	skin.width = width;
@@ -364,10 +362,8 @@ static rgbdata_t *Mod_CreateSkinData( model_t *mod, const byte *data, int width,
 		}
 	}
 
-	COM_FileBase( mod->name, name, sizeof( name ));
-
 	// for alias models only player can have remap textures
-	if( mod != NULL && !Q_stricmp( name, "player" ))
+	if( mod != NULL && !Q_stricmp( mod->name, "player" ))
 	{
 		texture_t	*tx = NULL;
 		int	i, size;
@@ -562,186 +558,6 @@ void Mod_AliasUnloadTextures( void *data )
 
 =============================================================
 */
-
-/*
-===============
-R_AliasDynamicLight
-
-similar to R_StudioDynamicLight
-===============
-*/
-static void R_AliasDynamicLight( cl_entity_t *ent, alight_t *plight )
-{
-	movevars_t	*mv = tr.movevars;
-	vec3_t		lightDir, vecSrc, vecEnd;
-	vec3_t		origin, dist, finalLight;
-	float		add, radius, total;
-	colorVec		light;
-	uint		lnum;
-
-	if( !plight || !ent )
-		return;
-
-	if( !RI.drawWorld || r_fullbright->value || FBitSet( ent->curstate.effects, EF_FULLBRIGHT ))
-	{
-		plight->shadelight = 0;
-		plight->ambientlight = 192;
-
-		VectorSet( plight->plightvec, 0.0f, 0.0f, -1.0f );
-		VectorSet( plight->color, 1.0f, 1.0f, 1.0f );
-		return;
-	}
-
-	// determine plane to get lightvalues from: ceil or floor
-	if( FBitSet( ent->curstate.effects, EF_INVLIGHT ))
-		VectorSet( lightDir, 0.0f, 0.0f, 1.0f );
-	else VectorSet( lightDir, 0.0f, 0.0f, -1.0f );
-
-	VectorCopy( ent->origin, origin );
-
-	VectorSet( vecSrc, origin[0], origin[1], origin[2] - lightDir[2] * 8.0f );
-	light.r = light.g = light.b = light.a = 0;
-
-	if(( mv->skycolor_r + mv->skycolor_g + mv->skycolor_b ) != 0 )
-	{
-		msurface_t	*psurf = NULL;
-		pmtrace_t		trace;
-
-		if( FBitSet( gp_host->features, ENGINE_WRITE_LARGE_COORD ))
-		{
-			vecEnd[0] = origin[0] - mv->skyvec_x * 65536.0f;
-			vecEnd[1] = origin[1] - mv->skyvec_y * 65536.0f;
-			vecEnd[2] = origin[2] - mv->skyvec_z * 65536.0f;
-		}
-		else
-		{
-			vecEnd[0] = origin[0] - mv->skyvec_x * 8192.0f;
-			vecEnd[1] = origin[1] - mv->skyvec_y * 8192.0f;
-			vecEnd[2] = origin[2] - mv->skyvec_z * 8192.0f;
-		}
-
-		trace = gEngfuncs.CL_TraceLine( vecSrc, vecEnd, PM_STUDIO_IGNORE );
-		if( trace.ent > 0 ) psurf = gEngfuncs.EV_TraceSurface( trace.ent, vecSrc, vecEnd );
-		else psurf = gEngfuncs.EV_TraceSurface( 0, vecSrc, vecEnd );
-
-		if( psurf && FBitSet( psurf->flags, SURF_DRAWSKY ))
-		{
-			VectorSet( lightDir, mv->skyvec_x, mv->skyvec_y, mv->skyvec_z );
-
-			light.r = mv->skycolor_r;
-			light.g = mv->skycolor_g;
-			light.b = mv->skycolor_b;
-		}
-	}
-
-	if(( light.r + light.g + light.b ) == 0 )
-	{
-		colorVec	gcolor;
-		float	grad[4];
-
-		VectorScale( lightDir, 2048.0f, vecEnd );
-		VectorAdd( vecEnd, vecSrc, vecEnd );
-
-		light = R_LightVec( vecSrc, vecEnd, g_alias.lightspot, g_alias.lightvec );
-
-		if( VectorIsNull( g_alias.lightvec ))
-		{
-			vecSrc[0] -= 16.0f;
-			vecSrc[1] -= 16.0f;
-			vecEnd[0] -= 16.0f;
-			vecEnd[1] -= 16.0f;
-
-			gcolor = R_LightVec( vecSrc, vecEnd, NULL, NULL );
-			grad[0] = ( gcolor.r + gcolor.g + gcolor.b ) / 768.0f;
-
-			vecSrc[0] += 32.0f;
-			vecEnd[0] += 32.0f;
-
-			gcolor = R_LightVec( vecSrc, vecEnd, NULL, NULL );
-			grad[1] = ( gcolor.r + gcolor.g + gcolor.b ) / 768.0f;
-
-			vecSrc[1] += 32.0f;
-			vecEnd[1] += 32.0f;
-
-			gcolor = R_LightVec( vecSrc, vecEnd, NULL, NULL );
-			grad[2] = ( gcolor.r + gcolor.g + gcolor.b ) / 768.0f;
-
-			vecSrc[0] -= 32.0f;
-			vecEnd[0] -= 32.0f;
-
-			gcolor = R_LightVec( vecSrc, vecEnd, NULL, NULL );
-			grad[3] = ( gcolor.r + gcolor.g + gcolor.b ) / 768.0f;
-
-			lightDir[0] = grad[0] - grad[1] - grad[2] + grad[3];
-			lightDir[1] = grad[1] + grad[0] - grad[2] - grad[3];
-			VectorNormalize( lightDir );
-		}
-		else
-		{
-			VectorCopy( g_alias.lightvec, lightDir );
-		}
-	}
-
-	VectorSet( finalLight, light.r, light.g, light.b );
-	ent->cvFloorColor = light;
-
-	total = Q_max( Q_max( light.r, light.g ), light.b );
-	if( total == 0.0f ) total = 1.0f;
-
-	// scale lightdir by light intentsity
-	VectorScale( lightDir, total, lightDir );
-
-	for( lnum = 0; lnum < MAX_DLIGHTS; lnum++ )
-	{
-		const dlight_t *dl = &tr.dlights[lnum];
-
-		if( dl->die < g_alias.time || !r_dynamic->value )
-			continue;
-
-		VectorSubtract( origin, dl->origin, dist );
-
-		radius = VectorLength( dist );
-		add = dl->radius - radius;
-
-		if( add > 0.0f )
-		{
-			total += add;
-
-			if( radius > 1.0f )
-				VectorScale( dist, ( add / radius ), dist );
-			else VectorScale( dist, add, dist );
-
-			VectorAdd( lightDir, dist, lightDir );
-
-			finalLight[0] += dl->color.r * ( add / 256.0f );
-			finalLight[1] += dl->color.g * ( add / 256.0f );
-			finalLight[2] += dl->color.b * ( add / 256.0f );
-		}
-	}
-
-	VectorScale( lightDir, 0.9f, lightDir );
-
-	plight->shadelight = VectorLength( lightDir );
-	plight->ambientlight = total - plight->shadelight;
-
-	total = Q_max( Q_max( finalLight[0], finalLight[1] ), finalLight[2] );
-
-	if( total > 0.0f )
-	{
-		plight->color[0] = finalLight[0] * ( 1.0f / total );
-		plight->color[1] = finalLight[1] * ( 1.0f / total );
-		plight->color[2] = finalLight[2] * ( 1.0f / total );
-	}
-	else VectorSet( plight->color, 1.0f, 1.0f, 1.0f );
-
-	if( plight->ambientlight > 128 )
-		plight->ambientlight = 128;
-
-	if( plight->ambientlight + plight->shadelight > 255 )
-		plight->shadelight = 255 - plight->ambientlight;
-
-	VectorNormalize2( lightDir, plight->plightvec );
-}
 
 /*
 ===============
@@ -1135,7 +951,7 @@ init current time for a given model
 */
 static void R_AliasSetupTimings( void )
 {
-	if( RI.drawWorld )
+	if( FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
 	{
 		// synchronize with server time
 		g_alias.time = gp_cl->time;
@@ -1197,7 +1013,7 @@ void R_DrawAliasModel( cl_entity_t *e )
 	// get lighting information
 	//
 	lighting.plightvec = dir;
-	R_AliasDynamicLight( e, &lighting );
+	R_EntityDynamicLight( e, &lighting, FBitSet( RI.rvp.flags, RF_DRAW_WORLD ), g_alias.time, g_alias.lightspot, g_alias.lightvec );
 
 	r_stats.c_alias_polys += m_pAliasHeader->numtris;
 	r_stats.c_alias_models_drawn++;

@@ -58,8 +58,8 @@ SV_AddEntitiesToPacket
 static void SV_AddEntitiesToPacket( edict_t *pViewEnt, edict_t *pClient, client_frame_t *frame, sv_ents_t *ents, qboolean from_client )
 {
 	edict_t		*ent;
-	byte		*clientpvs;
-	byte		*clientphs;
+	byte		*clientpvs = NULL;
+	byte		*clientphs = NULL;
 	qboolean		fullvis = false;
 	sv_client_t	*cl = NULL;
 	qboolean		player;
@@ -96,7 +96,7 @@ static void SV_AddEntitiesToPacket( edict_t *pViewEnt, edict_t *pClient, client_
 	{
 		byte	*pset;
 
-		ent = EDICT_NUM( e );
+		ent = SV_EdictNum( e );
 
 		// don't double add an entity through portals (in case this already added)
 		if( CHECKVISBIT( ents->sended, e ))
@@ -316,7 +316,7 @@ static void SV_EmitPacketEntities( sv_client_t *cl, client_frame_t *to, sizebuf_
 		if( newnum < oldnum )
 		{
 			entity_state_t	*baseline = &svs.baselines[newnum];
-			const char	*classname = SV_ClassName( EDICT_NUM( newnum ));
+			const char	*classname = SV_ClassName( SV_EdictNum( newnum ));
 			int		offset = 0;
 
 			// trying to reduce message by select optimal baseline
@@ -345,7 +345,7 @@ static void SV_EmitPacketEntities( sv_client_t *cl, client_frame_t *to, sizebuf_
 
 		if( newnum > oldnum )
 		{
-			edict_t	*ed = EDICT_NUM( oldent->number );
+			edict_t	*ed = SV_EdictNum( oldent->number );
 			qboolean	force = false;
 
 			// check if entity completely removed from server
@@ -821,7 +821,6 @@ void SV_SendClientMessages( void )
 {
 	sv_client_t *cl;
 	int          i;
-	double       updaterate_time;
 	double       time_until_next_message;
 
 	if( sv.state == ss_dead )
@@ -892,8 +891,7 @@ void SV_SendClientMessages( void )
 
 			// now that we were able to send, reset timer to point to next possible send time.
 			// check here also because sv_max/minupdaterate could been changed in runtime
-			updaterate_time = bound( 1.0 / sv_maxupdaterate.value, cl->cl_updaterate, 1.0 / sv_minupdaterate.value );
-			cl->next_messagetime = host.realtime + sv.frametime + updaterate_time;
+			cl->next_messagetime = host.realtime + sv.frametime + cl->next_messageinterval;
 			ClearBits( cl->flags, FCL_SEND_NET_MESSAGE );
 
 			// NOTE: we should send frame even if server is not simulated to prevent overflow
@@ -970,7 +968,7 @@ void SV_InactivateClients( void )
 		}
 
 		COM_ClearCustomizationList( &cl->customdata, false );
-		memset( cl->physinfo, 0, MAX_PHYSINFO_STRING );
+		memset( cl->physinfo, 0, sizeof( cl->physinfo ));
 
 		// NOTE: many mods sending messages that must be applied on a next level
 		// e.g. CryOfFear sending HideHud and PlayMp3 that affected after map change

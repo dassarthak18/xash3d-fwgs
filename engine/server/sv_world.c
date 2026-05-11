@@ -189,7 +189,7 @@ static hull_t *SV_HullForBsp( edict_t *ent, const vec3_t mins, const vec3_t maxs
 	model = SV_ModelHandle( ent->v.modelindex );
 
 	if( !model || model->type != mod_brush )
-		Host_Error( "Entity %i (%s) SOLID_BSP with a non bsp model %s\n", NUM_FOR_EDICT( ent ), SV_ClassName( ent ), STRING( ent->v.model ));
+		Host_Error( "Entity %i (%s) SOLID_BSP with a non bsp model %s\n", NUM_FOR_EDICT( ent ), SV_ClassName( ent ), SV_GetString( ent->v.model ));
 
 	VectorSubtract( maxs, mins, size );
 
@@ -1315,7 +1315,7 @@ trace_t SV_Move( const vec3_t start, vec3_t mins, vec3_t maxs, const vec3_t end,
 {
 	moveclip_t clip = { 0 };
 
-	SV_ClipMoveToEntity( EDICT_NUM( 0 ), start, mins, maxs, end, &clip.trace );
+	SV_ClipMoveToEntity( SV_EdictNum( 0 ), start, mins, maxs, end, &clip.trace );
 
 	if( clip.trace.fraction != 0.0f )
 	{
@@ -1329,7 +1329,7 @@ trace_t SV_Move( const vec3_t start, vec3_t mins, vec3_t maxs, const vec3_t end,
 		clip.type = (type & 0xFF);
 		clip.ignoretrans = type >> 8;
 		clip.monsterclip = false;
-		clip.passedict = (e) ? e : EDICT_NUM( 0 );
+		clip.passedict = (e) ? e : SV_EdictNum( 0 );
 		clip.mins = mins;
 		clip.maxs = maxs;
 
@@ -1372,7 +1372,7 @@ trace_t GAME_EXPORT SV_MoveNoEnts( const vec3_t start, vec3_t mins, vec3_t maxs,
 	float		trace_fraction;
 
 	memset( &clip, 0, sizeof( moveclip_t ));
-	SV_ClipMoveToEntity( EDICT_NUM( 0 ), start, mins, maxs, end, &clip.trace );
+	SV_ClipMoveToEntity( SV_EdictNum( 0 ), start, mins, maxs, end, &clip.trace );
 
 	if( clip.trace.fraction != 0.0f )
 	{
@@ -1384,7 +1384,7 @@ trace_t GAME_EXPORT SV_MoveNoEnts( const vec3_t start, vec3_t mins, vec3_t maxs,
 		clip.type = (type & 0xFF);
 		clip.ignoretrans = type >> 8;
 		clip.monsterclip = false;
-		clip.passedict = (e) ? e : EDICT_NUM( 0 );
+		clip.passedict = (e) ? e : SV_EdictNum( 0 );
 		clip.mins = mins;
 		clip.maxs = maxs;
 
@@ -1518,7 +1518,6 @@ static qboolean SV_RecursiveLightPoint( model_t *model, mnode_t *node, const vec
 	float front, back, frac;
 	int i, side;
 	vec3_t mid;
-	mnode_t *children[2];
 	int numsurfaces, firstsurface;
 
 	// didn't hit anything
@@ -1529,18 +1528,16 @@ static qboolean SV_RecursiveLightPoint( model_t *model, mnode_t *node, const vec
 	front = PlaneDiff( start, node->plane );
 	back = PlaneDiff( end, node->plane );
 
-	node_children( children, node, model );
-
 	side = front < 0.0f;
 	if(( back < 0.0f ) == side )
-		return SV_RecursiveLightPoint( model, children[side], start, end, point_color );
+		return SV_RecursiveLightPoint( model, node_child( node, side, model ), start, end, point_color );
 
 	frac = front / ( front - back );
 
 	VectorLerp( start, frac, end, mid );
 
 	// co down front side
-	if( SV_RecursiveLightPoint( model, children[side], start, mid, point_color ))
+	if( SV_RecursiveLightPoint( model, node_child( node, side, model ), start, mid, point_color ))
 		return true; // hit something
 
 	if(( back < 0.0f ) == side )
@@ -1602,7 +1599,7 @@ static qboolean SV_RecursiveLightPoint( model_t *model, mnode_t *node, const vec
 	}
 
 	// go down back side
-	return SV_RecursiveLightPoint( model, children[!side], mid, end, point_color );
+	return SV_RecursiveLightPoint( model, node_child( node, !side, model ), mid, end, point_color );
 }
 
 /*

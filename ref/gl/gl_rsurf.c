@@ -16,10 +16,19 @@ GNU General Public License for more details.
 #include "gl_local.h"
 #include "xash3d_mathlib.h"
 #include "mod_local.h"
+#include "atlas.h"
+
+#define TURBSCALE		( 256.0f / ( M_PI2 ))
+
+// speed up sin calculations
+static const float r_turbsin[] =
+{
+#include "warpsin.h"
+};
 
 typedef struct
 {
-	int		allocated[BLOCK_SIZE_MAX];
+	atlas_t		atlas;
 	int		current_lightmap_texture;
 	msurface_t	*dynamic_surfaces;
 	msurface_t	*lightmap_surfaces[MAX_LIGHTMAPS];
@@ -31,7 +40,6 @@ static vec2_t		world_orthohalf;
 static uint		r_blocklights[BLOCK_SIZE_MAX*BLOCK_SIZE_MAX*3];
 static mextrasurf_t		*fullbright_surfaces[MAX_TEXTURES];
 static mextrasurf_t		*detail_surfaces[MAX_TEXTURES];
-static int		rtable[MOD_FRAMES][MOD_FRAMES];
 
 typedef struct
 {
@@ -66,6 +74,39 @@ static inline void R_ResetSeparatePass( separate_pass_t *sp )
 static inline qboolean R_SeparatePassActive( const separate_pass_t *sp )
 {
 	return sp->last >= 0 ? true : false;
+}
+
+static qboolean Mod_HaveLightmappedWater( void )
+{
+	// if this flag set, it's level designer's job to ensure water has been properly lit
+	if( FBitSet( tr.world->flags, FWORLD_HAS_LITWATER ))
+		return true;
+
+	// otherwise, check user preference, as some maps have lightmapped water
+	return gl_litwater_force.value ? true : false;
+}
+
+static int Mod_LightmappedWaterMinlight( void )
+{
+	if( FBitSet( tr.world->flags, FWORLD_HAS_LITWATER ))
+	{
+		if( tr.world->litwater_minlight >= 0 )
+			return tr.world->litwater_minlight;
+	}
+
+	return 0;
+}
+
+static float Mod_LightmappedWaterScale( void )
+{
+	if( FBitSet( tr.world->flags, FWORLD_HAS_LITWATER ))
+	{
+		if( tr.world->litwater_scale >= 0.0f )
+			return tr.world->litwater_scale;
+
+	}
+
+	return 1.0f;
 }
 
 byte *Mod_GetCurrentVis( void )
@@ -244,12 +285,29 @@ static void SubdividePolygon_r( model_t *loadmodel, msurface_t *warpface, int nu
 	{
 		VectorCopy( verts, poly->verts[i] );
 		R_TextureCoord( verts, warpface, &poly->verts[i][3] );
+		// lightmap texcoords for subdivided surfaces will be calculated later
+	}
+}
 
-		// for speed reasons
-		if( !FBitSet( warpface->flags, SURF_DRAWTURB ))
+static void GL_BuildLightmapWater( model_t *mod, msurface_t *fa )
+{
+	float sample_size;
+	glpoly2_t *poly;
+
+	if( !mod || !fa->texinfo || !fa->texinfo->texture )
+		return; // bad polygon?
+
+	sample_size = gEngfuncs.Mod_SampleSizeForFace( fa );
+
+	for( poly = fa->polys; poly; poly = poly->next )
+	{
+		int i;
+
+		for( i = 0; i < poly->numverts; i++ )
 		{
-			// lightmap texture coordinates
-			R_LightmapCoord( verts, warpface, sample_size, &poly->verts[i][5] );
+			vec3_t vec;
+			VectorCopy( poly->verts[i], vec );
+			R_LightmapCoord( vec, fa, sample_size, &poly->verts[i][5] );
 		}
 	}
 }
@@ -323,7 +381,8 @@ void GL_SubdivideSurface( model_t *loadmodel, msurface_t *fa )
 	for( i = 0; i < fa->numedges; i++ )
 		R_GetEdgePosition( loadmodel, fa, i, verts[i] );
 
-	SetBits( fa->flags, SURF_DRAWTURB_QUADS ); // predict state
+	if( glConfig.context == CONTEXT_TYPE_GL )
+		SetBits( fa->flags, SURF_DRAWTURB_QUADS ); // predict state
 
 	// do subdivide
 	SubdividePolygon_r( loadmodel, fa, fa->numedges, verts[0] );
@@ -566,7 +625,7 @@ static void R_AddDynamicLights( const msurface_t *surf )
 		if( !FBitSet( surf->dlightbits, BIT( lnum )))
 			continue;	// not lit by this light
 
-		dl = &tr.dlights[lnum];
+		dl = &gp_dlights[lnum];
 
 		// transform light origin to local bmodel space
 		if( !tr.modelviewIdentity )
@@ -629,21 +688,6 @@ static void R_AddDynamicLights( const msurface_t *surf )
 }
 
 /*
-================
-R_SetCacheState
-================
-*/
-static void R_SetCacheState( msurface_t *surf )
-{
-	int	maps;
-
-	for( maps = 0; maps < MAXLIGHTMAPS && surf->styles[maps] != 255; maps++ )
-	{
-		surf->cached_light[maps] = tr.lightstylevalue[surf->styles[maps]];
-	}
-}
-
-/*
 =============================================================================
 
   LIGHTMAP ALLOCATION
@@ -652,56 +696,17 @@ static void R_SetCacheState( msurface_t *surf )
 */
 static void LM_InitBlock( void )
 {
-	memset( gl_lms.allocated, 0, sizeof( gl_lms.allocated ));
+	Atlas_Init( &gl_lms.atlas, BLOCK_SIZE );
 }
 
-static int LM_AllocBlock( int w, int h, int *x, int *y )
+static qboolean LM_AllocBlock( int w, int h, int *x, int *y )
 {
-	int	i, j;
-	int	best, best2;
-
-	best = BLOCK_SIZE;
-
-	for( i = 0; i < BLOCK_SIZE - w; i++ )
-	{
-		best2 = 0;
-
-		for( j = 0; j < w; j++ )
-		{
-			if( gl_lms.allocated[i+j] >= best )
-				break;
-			if( gl_lms.allocated[i+j] > best2 )
-				best2 = gl_lms.allocated[i+j];
-		}
-
-		if( j == w )
-		{
-			// this is a valid spot
-			*x = i;
-			*y = best = best2;
-		}
-	}
-
-	if( best + h > BLOCK_SIZE )
-		return false;
-
-	for( i = 0; i < w; i++ )
-		gl_lms.allocated[*x + i] = best + h;
-
-	return true;
+	return Atlas_AllocBlock( &gl_lms.atlas, w, h, x, y );
 }
 
 static void LM_UploadDynamicBlock( void )
 {
-	int	height = 0, i;
-
-	for( i = 0; i < BLOCK_SIZE; i++ )
-	{
-		if( gl_lms.allocated[i] > height )
-			height = gl_lms.allocated[i];
-	}
-
-	pglTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, BLOCK_SIZE, height, GL_RGBA, GL_UNSIGNED_BYTE, gl_lms.lightmap_buffer );
+	pglTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, BLOCK_SIZE, gl_lms.atlas.max_height, GL_RGBA, GL_UNSIGNED_BYTE, gl_lms.lightmap_buffer );
 }
 
 static void LM_UploadBlock( qboolean dynamic )
@@ -748,6 +753,8 @@ static void R_BuildLightMap( const msurface_t *surf, byte *dest, int stride, qbo
 	const mextrasurf_t *info = surf->info;
 	int lightscale;
 
+	const int litwater_minlight = Mod_LightmappedWaterMinlight();
+	const float litwater_scale = Mod_LightmappedWaterScale();
 	const int sample_size = gEngfuncs.Mod_SampleSizeForFace( surf );
 	const int smax = ( info->lightextents[0] / sample_size ) + 1;
 	const int tmax = ( info->lightextents[1] / sample_size ) + 1;
@@ -769,7 +776,7 @@ static void R_BuildLightMap( const msurface_t *surf, byte *dest, int stride, qbo
 		if( surf->styles[map] >= 255 )
 			break;
 
-		scale = tr.lightstylevalue[surf->styles[map]];
+		scale = g_lightstylevalue[surf->styles[map]];
 
 		for( i = 0; i < size; i++ )
 		{
@@ -797,6 +804,14 @@ static void R_BuildLightMap( const msurface_t *surf, byte *dest, int stride, qbo
 			{
 				int t = bl[i] * lightscale >> 14;
 
+				// amp up water lightmap to avoid too dark water
+				// when the it wasn't properly lit by the level designer
+				if( FBitSet( surf->flags, SURF_DRAWTURB ))
+				{
+					float ft = t * litwater_scale;
+					t = Q_max( Q_rint( ft ), litwater_minlight );
+				}
+
 				if( t > 1023 )
 					t = 1023;
 
@@ -808,30 +823,87 @@ static void R_BuildLightMap( const msurface_t *surf, byte *dest, int stride, qbo
 }
 
 /*
+=============
+R_DrawTriangleOutlines
+=============
+*/
+static void R_DrawTriangleOutlines( void )
+{
+	int		i, j;
+	msurface_t	*surf;
+	glpoly2_t		*p;
+	float		*v;
+
+	if( !gl_wireframe.value )
+		return;
+
+	pglDisable( GL_TEXTURE_2D );
+	pglDisable( GL_DEPTH_TEST );
+	pglColor4f( 1.0f, 1.0f, 1.0f, 1.0f );
+	pglPolygonMode( GL_FRONT_AND_BACK, GL_LINE );
+
+	// render static surfaces first
+	for( i = 0; i < MAX_LIGHTMAPS; i++ )
+	{
+		for( surf = gl_lms.lightmap_surfaces[i]; surf != NULL; surf = surf->info->lightmapchain )
+		{
+			p = surf->polys;
+			for( ; p != NULL; p = p->chain )
+			{
+				pglBegin( GL_POLYGON );
+				v = p->verts[0];
+				for( j = 0; j < p->numverts; j++, v += VERTEXSIZE )
+					pglVertex3fv( v );
+				pglEnd ();
+			}
+		}
+	}
+
+	// render surfaces with dynamic lightmaps
+	for( surf = gl_lms.dynamic_surfaces; surf != NULL; surf = surf->info->lightmapchain )
+	{
+		p = surf->polys;
+
+		for( ; p != NULL; p = p->chain )
+		{
+			pglBegin( GL_POLYGON );
+			v = p->verts[0];
+			for( j = 0; j < p->numverts; j++, v += VERTEXSIZE )
+				pglVertex3fv( v );
+			pglEnd ();
+		}
+	}
+
+	pglPolygonMode( GL_FRONT_AND_BACK, GL_FILL );
+	pglEnable( GL_DEPTH_TEST );
+	pglEnable( GL_TEXTURE_2D );
+}
+
+/*
 ================
 DrawGLPoly
 ================
 */
 static void DrawGLPoly( glpoly2_t *p, float xScale, float yScale )
 {
-	float		*v;
-	float		sOffset, sy;
-	float		tOffset, cy;
-	cl_entity_t	*e = RI.currententity;
-	int		i, hasScale = false;
+	float *v;
+	float sOffset, tOffset;
+	int i;
 
-	if( !p ) return;
+	if( !p )
+		return;
 
 	if( FBitSet( p->flags, SURF_DRAWTILED ))
 		GL_ResetFogColor();
 
-	if( p->flags & SURF_CONVEYOR )
+	if( FBitSet( p->flags, SURF_CONVEYOR ))
 	{
-		float		flConveyorSpeed = 0.0f;
-		float		flRate, flAngle;
-		gl_texture_t	*texture;
+		const cl_entity_t *e = RI.currententity;
+		float flConveyorSpeed;
+		float flRate, flAngle, sy, cy;
+		gl_texture_t *texture;
 
-		if( ENGINE_GET_PARM( PARM_QUAKE_COMPATIBLE ) && RI.currententity == CL_GetEntityByIndex( 0 ))
+		if( e == CL_GetEntityByIndex( 0 ) && FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ))
 		{
 			// same as doom speed
 			flConveyorSpeed = -35.0f;
@@ -863,8 +935,7 @@ static void DrawGLPoly( glpoly2_t *p, float xScale, float yScale )
 		sOffset = tOffset = 0.0f;
 	}
 
-	if( xScale != 0.0f && yScale != 0.0f )
-		hasScale = true;
+	const qboolean hasScale = xScale != 0.0f && yScale != 0.0f;
 
 	pglBegin( GL_POLYGON );
 
@@ -884,18 +955,156 @@ static void DrawGLPoly( glpoly2_t *p, float xScale, float yScale )
 }
 
 /*
+=============
+EmitWaterPolys
+
+Does a water warp on the pre-fragmented glpoly_t chain
+=============
+*/
+static void EmitWaterPolys( msurface_t *warp, qboolean reverse, qboolean ripples )
+{
+	float	*v, nv, waveHeight;
+	float	s, t, os, ot;
+	glpoly2_t	*p;
+	int	i;
+
+	const qboolean useQuads = FBitSet( warp->flags, SURF_DRAWTURB_QUADS ) && glConfig.context == CONTEXT_TYPE_GL;
+
+	if( !warp->polys ) return;
+
+	// set the current waveheight
+	if( warp->polys->verts[0][2] >= RI.rvp.vieworigin[2] )
+		waveHeight = -RI.currententity->curstate.scale;
+	else waveHeight = RI.currententity->curstate.scale;
+
+	// reset fog color for nonlightmapped water
+	GL_ResetFogColor();
+
+	if( useQuads )
+		pglBegin( GL_QUADS );
+
+	for( p = warp->polys; p; p = p->next )
+	{
+		if( reverse )
+			v = p->verts[0] + ( p->numverts - 1 ) * VERTEXSIZE;
+		else v = p->verts[0];
+
+		if( !useQuads )
+			pglBegin( GL_POLYGON );
+
+		for( i = 0; i < p->numverts; i++ )
+		{
+			if( waveHeight )
+			{
+				nv = r_turbsin[(int)(gp_cl->time * 160.0f + v[1] + v[0]) & 255] + 8.0f;
+				nv = (r_turbsin[(int)(v[0] * 5.0f + gp_cl->time * 171.0f - v[1]) & 255] + 8.0f ) * 0.8f + nv;
+				nv = nv * waveHeight + v[2];
+			}
+			else nv = v[2];
+
+			os = v[3];
+			ot = v[4];
+
+			if( !ripples )
+			{
+				s = os + r_turbsin[(int)((ot * 0.125f + gp_cl->time) * TURBSCALE) & 255];
+				t = ot + r_turbsin[(int)((os * 0.125f + gp_cl->time) * TURBSCALE) & 255];
+			}
+			else
+			{
+				s = os;
+				t = ot;
+			}
+
+			s *= ( 1.0f / SUBDIVIDE_SIZE );
+			t *= ( 1.0f / SUBDIVIDE_SIZE );
+
+			pglTexCoord2f( s, t );
+			pglVertex3f( v[0], v[1], nv );
+
+			if( reverse )
+				v -= VERTEXSIZE;
+			else v += VERTEXSIZE;
+		}
+
+		if( !useQuads )
+			pglEnd();
+	}
+
+	if( useQuads )
+		pglEnd();
+
+	GL_SetupFogColorForSurfaces();
+}
+
+/*
+================
+EmitWaterLightPolys
+
+Render water lightmaps
+================
+*/
+static void EmitWaterLightPolys( msurface_t *warp, float soffset, float toffset, qboolean dynamic )
+{
+	const qboolean useQuads = FBitSet( warp->flags, SURF_DRAWTURB_QUADS );
+	glpoly2_t *p;
+	float waveHeight = RI.currententity->curstate.scale;
+
+	// set the current waveheight
+	if( warp->polys->verts[0][2] >= RI.rvp.vieworigin[2] )
+		waveHeight = -waveHeight;
+
+	if( useQuads )
+		pglBegin( GL_QUADS );
+
+	for( p = warp->polys; p; p = p->next )
+	{
+		float	*v = p->verts[0];
+		int i;
+
+		if( !useQuads )
+			pglBegin( GL_POLYGON );
+
+		for( i = 0; i < p->numverts; i++, v += VERTEXSIZE )
+		{
+			if( !dynamic ) pglTexCoord2f( v[5], v[6] );
+			else pglTexCoord2f( v[5] - soffset, v[6] - toffset );
+
+			if( waveHeight )
+			{
+				float nv = r_turbsin[(int)(gp_cl->time * 160.0f + v[1] + v[0]) & 255] + 8.0f;
+				nv = (r_turbsin[(int)(v[0] * 5.0f + gp_cl->time * 171.0f - v[1]) & 255] + 8.0f ) * 0.8f + nv;
+				nv = nv * waveHeight + v[2];
+
+				pglVertex3f( v[0], v[1], nv );
+			}
+			else pglVertex3fv( v );
+		}
+
+		if( !useQuads )
+			pglEnd ();
+	}
+
+	if( useQuads )
+		pglEnd();
+}
+
+/*
 ================
 DrawGLPolyChain
 
 Render lightmaps
 ================
 */
-static void DrawGLPolyChain( glpoly2_t *p, float soffset, float toffset )
+static void DrawGLPolyChain( glpoly2_t *p, float soffset, float toffset, msurface_t *surf )
 {
-	qboolean	dynamic = true;
+	const qboolean dynamic = soffset != 0.0f || toffset != 0.0f;
 
-	if( soffset == 0.0f && toffset == 0.0f )
-		dynamic = false;
+	if( FBitSet( surf->flags, SURF_DRAWTURB ))
+	{
+		EmitWaterLightPolys( surf, soffset, toffset, dynamic );
+		return;
+	}
 
 	for( ; p != NULL; p = p->chain )
 	{
@@ -929,6 +1138,8 @@ static qboolean R_HasLightmap( void )
 		switch( RI.currententity->curstate.rendermode )
 		{
 		case kRenderTransTexture:
+			return FBitSet( RI.currentmodel->flags, MODEL_LIQUID ) ? true : false;
+
 		case kRenderTransColor:
 		case kRenderTransAdd:
 		case kRenderGlow:
@@ -958,21 +1169,29 @@ static void R_BlendLightmaps( void )
 		pglEnable( GL_BLEND );
 	else pglDisable( GL_BLEND );
 
-	// lightmapped solid surfaces
-	pglDepthMask( GL_FALSE );
-	pglDepthFunc( GL_EQUAL );
-
 	pglDisable( GL_ALPHA_TEST );
-	if( gl_overbright.value )
+
+	if( RI.currententity->curstate.rendermode == kRenderTransTexture )
 	{
-		pglBlendFunc( GL_DST_COLOR, GL_SRC_COLOR );
-		if(!( R_HasEnabledVBO() && !r_vbo_overbrightmode.value ))
-			pglColor4f( 128.0f / 192.0f, 128.0f / 192.0f, 128.0f / 192.0f, 1.0f );
+		pglBlendFunc( GL_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA );
 	}
 	else
 	{
-		pglBlendFunc( GL_ZERO, GL_SRC_COLOR );
+		// lightmapped solid surfaces
+		pglDepthMask( GL_FALSE );
+		pglDepthFunc( GL_EQUAL );
+		if( gl_overbright.value )
+		{
+			pglBlendFunc( GL_DST_COLOR, GL_SRC_COLOR );
+			if(!( R_HasEnabledVBO() && !r_vbo_overbrightmode.value ))
+				pglColor4f( 128.0f / 192.0f, 128.0f / 192.0f, 128.0f / 192.0f, 1.0f );
+		}
+		else
+		{
+			pglBlendFunc( GL_ZERO, GL_SRC_COLOR );
+		}
 	}
+
 	pglTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE );
 
 	// render static lightmaps first
@@ -984,7 +1203,7 @@ static void R_BlendLightmaps( void )
 
 			for( surf = gl_lms.lightmap_surfaces[i]; surf != NULL; surf = surf->info->lightmapchain )
 			{
-				if( surf->polys ) DrawGLPolyChain( surf->polys, 0.0f, 0.0f );
+				DrawGLPolyChain( surf->polys, 0.0f, 0.0f, surf );
 			}
 		}
 	}
@@ -1025,12 +1244,10 @@ static void R_BlendLightmaps( void )
 				// draw all surfaces that use this lightmap
 				for( drawsurf = newsurf; drawsurf != surf; drawsurf = drawsurf->info->lightmapchain )
 				{
-					if( drawsurf->polys )
-					{
-						DrawGLPolyChain( drawsurf->polys,
+					DrawGLPolyChain( drawsurf->polys,
 						( drawsurf->light_s - drawsurf->info->dlight_s ) * ( 1.0f / (float)BLOCK_SIZE ),
-						( drawsurf->light_t - drawsurf->info->dlight_t ) * ( 1.0f / (float)BLOCK_SIZE ));
-					}
+						( drawsurf->light_t - drawsurf->info->dlight_t ) * ( 1.0f / (float)BLOCK_SIZE ),
+						drawsurf );
 				}
 
 				newsurf = drawsurf;
@@ -1054,12 +1271,10 @@ static void R_BlendLightmaps( void )
 
 		for( surf = newsurf; surf != NULL; surf = surf->info->lightmapchain )
 		{
-			if( surf->polys )
-			{
-				DrawGLPolyChain( surf->polys,
+			DrawGLPolyChain( surf->polys,
 				( surf->light_s - surf->info->dlight_s ) * ( 1.0f / (float)BLOCK_SIZE ),
-				( surf->light_t - surf->info->dlight_t ) * ( 1.0f / (float)BLOCK_SIZE ));
-			}
+				( surf->light_t - surf->info->dlight_t ) * ( 1.0f / (float)BLOCK_SIZE ),
+				surf );
 		}
 	}
 
@@ -1078,10 +1293,10 @@ static void R_BlendLightmaps( void )
 R_RenderFullbrights
 ================
 */
-static void R_RenderFullbrights( void )
+static void R_RenderFullbrights( qboolean allow_vbo )
 {
-	mextrasurf_t	*es, *p;
-	int		i;
+	mextrasurf_t *es, *p;
+	int i;
 
 	if( !R_SeparatePassActive( &draw_fullbrights ))
 		return;
@@ -1095,11 +1310,8 @@ static void R_RenderFullbrights( void )
 
 	// if fullbright textures are drawn in separate pass from VBO they
 	// cause z-fighting, this is noticeable on `slide_waifufu.bsp` map
-	if( R_HasEnabledVBO() && gl_polyoffset.value )
-	{
-		pglEnable( GL_POLYGON_OFFSET_FILL );
-		pglPolygonOffset( -1.0f, -gl_polyoffset.value );
-	}
+	if( allow_vbo && gl_polyoffset.value )
+		GL_PushPolygonOffset( -1.0f, -gl_polyoffset.value );
 
 	for( i = draw_fullbrights.first; i <= draw_fullbrights.last; i++ )
 	{
@@ -1116,8 +1328,8 @@ static void R_RenderFullbrights( void )
 		es->lumachain = NULL;
 	}
 
-	if( R_HasEnabledVBO() && gl_polyoffset.value )
-		pglDisable( GL_POLYGON_OFFSET_FILL );
+	if( allow_vbo && gl_polyoffset.value )
+		GL_PopPolygonOffset();
 
 	pglDisable( GL_BLEND );
 	pglDepthMask( GL_TRUE );
@@ -1148,7 +1360,7 @@ static void R_RenderDetails( int passes )
 	pglEnable( GL_BLEND );
 	pglBlendFunc( GL_DST_COLOR, GL_SRC_COLOR );
 	pglTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_DECAL );
-	if(passes == 3)
+	if( passes == 3 )
 		pglDepthFunc( GL_EQUAL );
 	else
 	{
@@ -1240,70 +1452,59 @@ static void R_RenderDecalsForSurface( msurface_t *fa, int cull_type )
 
 static qboolean R_CheckLightMap( msurface_t *fa )
 {
-	qboolean is_dynamic = false;
 	int maps;
 
-	// check for lightmap modification
+	if( unlikely( !r_dynamic->value ))
+		return false;
+
+	if( fa->dlightframe == tr.framecount )
+		return true; // dlighted surfaces are always dynamic
+
+	// check for light styles
 	for( maps = 0; maps < MAXLIGHTMAPS && fa->styles[maps] != 255; maps++ )
 	{
-		if( tr.lightstylevalue[fa->styles[maps]] != fa->cached_light[maps] )
-			goto dynamic;
-	}
+		if( g_lightstylevalue[fa->styles[maps]] == fa->cached_light[maps] )
+			continue;
 
-	// dynamic this frame or dynamic previously
-	if( fa->dlightframe == tr.framecount )
-	{
-dynamic:
-		// NOTE: at this point we have only valid textures
-		if( r_dynamic->value )
-			is_dynamic = true;
-	}
-
-	if( is_dynamic )
-	{
 		const int style = fa->styles[maps];
 
-		if( maps < MAXLIGHTMAPS && ( style >= 32 || style == 0 || style == 20 ) && fa->dlightframe != tr.framecount )
-		{
-			byte		temp[132*132*4];
-			mextrasurf_t	*info = fa->info;
-			int		sample_size;
-			int		smax, tmax;
+		// flickering light styles can go to dynamic chain
+		if( !( style >= 32 || style == 0 || style == 20 ))
+			return true;
 
-			sample_size = gEngfuncs.Mod_SampleSizeForFace( fa );
-			smax = ( info->lightextents[0] / sample_size ) + 1;
-			tmax = ( info->lightextents[1] / sample_size ) + 1;
+		byte temp[132*132*4];
+		mextrasurf_t *info = fa->info;
+		int sample_size = gEngfuncs.Mod_SampleSizeForFace( fa );
+		int smax = ( info->lightextents[0] / sample_size ) + 1;
+		int tmax = ( info->lightextents[1] / sample_size ) + 1;
 
-			if( smax < 132 && tmax < 132 )
-				R_BuildLightMap( fa, temp, smax * 4, true );
-			else
-			{
-				smax = Q_min( smax, 132 );
-				tmax = Q_min( tmax, 132 );
-				memset( temp, 255, sizeof( temp ));
-				//Host_MapDesignError( "%s: bad surface extents: %d %d", __func__, fa->extents[0], fa->extents[1] );
-			}
-
-			R_SetCacheState( fa );
-
-#if XASH_WES
-			GL_Bind( XASH_TEXTURE1, tr.lightmapTextures[fa->lightmaptexturenum] );
-			pglTexParameteri( GL_TEXTURE_2D, GL_GENERATE_MIPMAP_SGIS, GL_TRUE );
-#else
-			GL_Bind( XASH_TEXTURE0, tr.lightmapTextures[fa->lightmaptexturenum] );
-#endif
-
-			pglTexSubImage2D( GL_TEXTURE_2D, 0, fa->light_s, fa->light_t, smax, tmax, GL_RGBA, GL_UNSIGNED_BYTE, temp );
-
-#if XASH_WES
-			GL_SelectTexture( XASH_TEXTURE0 );
-#endif
-		}
+		if( smax < 132 && tmax < 132 )
+			R_BuildLightMap( fa, temp, smax * 4, true );
 		else
-			return true; // add to dynamic chain
+		{
+			smax = Q_min( smax, 132 );
+			tmax = Q_min( tmax, 132 );
+			memset( temp, 255, sizeof( temp ));
+			//Host_MapDesignError( "%s: bad surface extents: %d %d", __func__, fa->extents[0], fa->extents[1] );
+		}
+
+		R_UpdateSurfaceCachedLight( fa );
+
+#if XASH_WES
+		GL_Bind( XASH_TEXTURE1, tr.lightmapTextures[fa->lightmaptexturenum] );
+		pglTexParameteri( GL_TEXTURE_2D, GL_GENERATE_MIPMAP_SGIS, GL_TRUE );
+#else
+		GL_Bind( XASH_TEXTURE0, tr.lightmapTextures[fa->lightmaptexturenum] );
+#endif
+		pglTexSubImage2D( GL_TEXTURE_2D, 0, fa->light_s, fa->light_t, smax, tmax, GL_RGBA, GL_UNSIGNED_BYTE, temp );
+
+#if XASH_WES
+		GL_SelectTexture( XASH_TEXTURE0 );
+#endif
+		return false;
 	}
 
-	return false; // updated
+	return false; // no change
 }
 
 static void R_RenderLightmapForSurface( msurface_t *fa )
@@ -1341,8 +1542,13 @@ static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
 
 	if( FBitSet( fa->flags, SURF_DRAWTURB ))
 	{
-		// warp texture, no lightmaps
+		// warp texture
 		EmitWaterPolys( fa, cull_type == CULL_BACKSIDE, R_UploadRipples( t ));
+
+		// add lightmaps if requested
+		if( Mod_HaveLightmappedWater( ))
+			R_RenderLightmapForSurface( fa );
+
 		return;
 	}
 	else GL_Bind( XASH_TEXTURE0, t->gl_texturenum );
@@ -1405,13 +1611,13 @@ static void R_DrawTextureChains( void )
 		if( !s || ( i == tr.skytexturenum ))
 			continue;
 
-		if(( s->flags & SURF_DRAWTURB ) && tr.movevars->wateralpha < 1.0f )
+		if(( s->flags & SURF_DRAWTURB ) && gp_movevars->wateralpha < 1.0f )
 		{
 			R_AddToSeparatePass( &draw_wateralpha, i );
 			continue;	// draw translucent water later
 		}
 
-		if( ENGINE_GET_PARM( PARM_QUAKE_COMPATIBLE ) && FBitSet( s->flags, SURF_TRANSPARENT ))
+		if( FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ) && FBitSet( s->flags, SURF_TRANSPARENT ))
 		{
 			R_AddToSeparatePass( &draw_alpha_surfaces, i );
 			continue;	// draw transparent surfaces later
@@ -1490,7 +1696,7 @@ void R_DrawWaterSurfaces( void )
 	msurface_t	*s;
 	texture_t		*t;
 
-	if( !RI.drawWorld || RI.onlyClientDraw )
+	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ) || FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
 		return;
 
 	// non-transparent water is already drawed
@@ -1509,7 +1715,7 @@ void R_DrawWaterSurfaces( void )
 	pglDisable( GL_ALPHA_TEST );
 	pglBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
 	pglTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE );
-	pglColor4f( 1.0f, 1.0f, 1.0f, tr.movevars->wateralpha );
+	pglColor4f( 1.0f, 1.0f, 1.0f, gp_movevars->wateralpha );
 
 	for( i = draw_wateralpha.first; i <= draw_wateralpha.last; i++ )
 	{
@@ -1523,10 +1729,19 @@ void R_DrawWaterSurfaces( void )
 			continue;
 
 		for( ; s; s = s->texturechain )
+		{
 			EmitWaterPolys( s, false, R_UploadRipples( t ));
+
+			if( Mod_HaveLightmappedWater( ))
+				R_RenderLightmapForSurface( s );
+		}
 
 		t->texturechain = NULL;
 	}
+
+// litwater: not sure if needed
+	GL_ResetFogColor();
+	R_BlendLightmaps();
 
 	R_ResetSeparatePass( &draw_wateralpha );
 
@@ -1592,7 +1807,7 @@ static void R_SetRenderMode( cl_entity_t *e )
 	case kRenderTransAlpha:
 		pglEnable( GL_ALPHA_TEST );
 		pglTexEnvf( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE );
-		if( ENGINE_GET_PARM( PARM_QUAKE_COMPATIBLE ))
+		if( FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ))
 		{
 			pglBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
 			pglColor4f( 1.0f, 1.0f, 1.0f, tr.blend );
@@ -1615,6 +1830,59 @@ static void R_SetRenderMode( cl_entity_t *e )
 	}
 }
 
+static int R_SortBrushModelSurfaces( cl_entity_t *e, model_t *clmodel, vec3_t mins )
+{
+	qboolean quake_compatible = FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ) ? true : false;
+	int num_sorted = 0;
+
+	for( int i = 0; i < clmodel->nummodelsurfaces; i++ )
+	{
+		msurface_t *psurf = &clmodel->surfaces[clmodel->firstmodelsurface + i];
+
+		if( FBitSet( psurf->flags, SURF_DRAWTURB ) && !quake_compatible )
+		{
+			if( psurf->plane->type != PLANE_Z && !FBitSet( e->curstate.effects, EF_WATERSIDES ))
+				continue;
+
+			if( mins[2] + 1.0f >= psurf->plane->dist )
+				continue;
+		}
+
+		int cull_type = R_CullSurface( psurf, &RI.frustum, RI.frustum.clipFlags );
+
+		if( cull_type >= CULL_FRUSTUM )
+			continue;
+
+		if( cull_type == CULL_BACKSIDE )
+		{
+			if( FBitSet( psurf->flags, SURF_DRAWTURB ))
+			{
+				if( Mod_HaveLightmappedWater( ))
+					continue; // we don't want back faces when drawing lightmaps to avoid Z fighting
+			}
+			else
+			{
+				if( !( psurf->pdecals && e->curstate.rendermode == kRenderTransTexture ))
+					continue;
+			}
+		}
+
+		if( num_sorted < gpGlobals->max_surfaces )
+		{
+			gpGlobals->draw_surfaces[num_sorted].surf = psurf;
+			gpGlobals->draw_surfaces[num_sorted].cull = cull_type;
+			num_sorted++;
+		}
+	}
+
+	// sort faces if needs
+	if( !FBitSet( clmodel->flags, MODEL_LIQUID ) && e->curstate.rendermode == kRenderTransTexture && !gl_nosort.value )
+		qsort( gpGlobals->draw_surfaces, num_sorted, sizeof( sortedface_t ), R_SurfaceCompare );
+
+	return num_sorted;
+
+}
+
 /*
 =================
 R_DrawBrushModel
@@ -1622,20 +1890,15 @@ R_DrawBrushModel
 */
 void R_DrawBrushModel( cl_entity_t *e )
 {
-	int		i, k, num_sorted;
-	vec3_t		origin_l, oldorigin;
-	int		old_rendermode;
-	vec3_t		mins, maxs;
-	int		cull_type;
-	msurface_t	*psurf;
-	model_t		*clmodel;
-	qboolean		rotated;
-	dlight_t		*l;
+	int old_rendermode;
+	vec3_t mins, maxs;
+	qboolean rotated;
 	qboolean allow_vbo = R_HasEnabledVBO();
 
-	if( !RI.drawWorld ) return;
+	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
+		return;
 
-	clmodel = e->model;
+	model_t *clmodel = e->model;
 
 	// external models not loaded to VBO
 	if( clmodel->surfaces != WORLDMODEL->surfaces )
@@ -1643,7 +1906,7 @@ void R_DrawBrushModel( cl_entity_t *e )
 
 	if( !VectorIsNull( e->angles ))
 	{
-		for( i = 0; i < 3; i++ )
+		for( int i = 0; i < 3; i++ )
 		{
 			mins[i] = e->origin[i] - clmodel->radius;
 			maxs[i] = e->origin[i] + clmodel->radius;
@@ -1664,31 +1927,26 @@ void R_DrawBrushModel( cl_entity_t *e )
 	old_rendermode = e->curstate.rendermode;
 	gl_lms.dynamic_surfaces = NULL;
 
-	if( rotated ) R_RotateForEntity( e );
-	else R_TranslateForEntity( e );
+	if( rotated )
+	{
+		R_RotateForEntity( e );
 
-	if( ENGINE_GET_PARM( PARM_QUAKE_COMPATIBLE ) && FBitSet( clmodel->flags, MODEL_TRANSPARENT ))
+		Matrix4x4_VectorITransform( RI.objectMatrix, RI.cullorigin, tr.modelorg );
+	}
+	else
+	{
+		R_TranslateForEntity( e );
+
+		VectorSubtract( RI.cullorigin, e->origin, tr.modelorg );
+	}
+
+	if( FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ) && FBitSet( clmodel->flags, MODEL_TRANSPARENT ))
 		e->curstate.rendermode = kRenderTransAlpha;
 
 	e->visframe = tr.realframecount; // visible
 
-	if( rotated ) Matrix4x4_VectorITransform( RI.objectMatrix, RI.cullorigin, tr.modelorg );
-	else VectorSubtract( RI.cullorigin, e->origin, tr.modelorg );
-
 	// calculate dynamic lighting for bmodel
-	for( k = 0; k < MAX_DLIGHTS; k++ )
-	{
-		l = &tr.dlights[k];
-
-		if( l->die < gp_cl->time || !l->radius )
-			continue;
-
-		VectorCopy( l->origin, oldorigin ); // save lightorigin
-		Matrix4x4_VectorITransform( RI.objectMatrix, l->origin, origin_l );
-		VectorCopy( origin_l, l->origin ); // move light in bmodel space
-		R_MarkLights( l, 1<<k, clmodel->nodes + clmodel->hulls[0].firstclipnode );
-		VectorCopy( oldorigin, l->origin ); // restore lightorigin
-	}
+	R_PushDlightsForBmodel( clmodel, tr.dlightframecount, RI.objectMatrix );
 
 	// setup the rendermode
 	R_SetRenderMode( e );
@@ -1704,56 +1962,36 @@ void R_DrawBrushModel( cl_entity_t *e )
 	if( !allow_vbo )
 		GL_SetupFogColorForSurfaces ();
 
-	psurf = &clmodel->surfaces[clmodel->firstmodelsurface];
-	num_sorted = 0;
+	int num_sorted = R_SortBrushModelSurfaces( e, clmodel, mins );
 
-	for( i = 0; i < clmodel->nummodelsurfaces; i++, psurf++ )
-	{
-		if( FBitSet( psurf->flags, SURF_DRAWTURB ) && !ENGINE_GET_PARM( PARM_QUAKE_COMPATIBLE ))
-		{
-			if( psurf->plane->type != PLANE_Z && !FBitSet( e->curstate.effects, EF_WATERSIDES ))
-				continue;
-			if( mins[2] + 1.0f >= psurf->plane->dist )
-				continue;
-		}
-
-		cull_type = R_CullSurface( psurf, &RI.frustum, RI.frustum.clipFlags );
-
-		if( cull_type >= CULL_FRUSTUM )
-			continue;
-
-		if( cull_type == CULL_BACKSIDE )
-		{
-			if( !FBitSet( psurf->flags, SURF_DRAWTURB ) && !( psurf->pdecals && e->curstate.rendermode == kRenderTransTexture ))
-				continue;
-		}
-
-		if( num_sorted < gpGlobals->max_surfaces )
-		{
-			gpGlobals->draw_surfaces[num_sorted].surf = psurf;
-			gpGlobals->draw_surfaces[num_sorted].cull = cull_type;
-			num_sorted++;
-		}
-	}
-
-	// sort faces if needs
-	if( !FBitSet( clmodel->flags, MODEL_LIQUID ) && e->curstate.rendermode == kRenderTransTexture && !gl_nosort.value )
-		qsort( gpGlobals->draw_surfaces, num_sorted, sizeof( sortedface_t ), R_SurfaceCompare );
+	// draw bmodels with a polyoffset to avoid flickering when they are too close to world
+	// R_DrawVBO and DrawDecalsBatch will restore polyoffset
+	if( gl_polyoffset_bmodels.value )
+		GL_PushPolygonOffset( -0.5f, -gl_polyoffset_bmodels.value );
 
 	// draw sorted translucent surfaces
-	for( i = 0; i < num_sorted; i++ )
-		if( !allow_vbo || !R_AddSurfToVBO( gpGlobals->draw_surfaces[i].surf, true ) )
+	for( int i = 0; i < num_sorted; i++ )
+	{
+		if( !allow_vbo || !R_AddSurfToVBO( gpGlobals->draw_surfaces[i].surf, true ))
 			R_RenderBrushPoly( gpGlobals->draw_surfaces[i].surf, gpGlobals->draw_surfaces[i].cull );
+	}
+
 	R_DrawVBO( R_HasLightmap(), true );
 
 	if( e->curstate.rendermode == kRenderTransColor )
 		pglEnable( GL_TEXTURE_2D );
 
 	DrawDecalsBatch();
+
 	GL_ResetFogColor();
 	R_BlendLightmaps();
-	R_RenderFullbrights();
-	R_RenderDetails( allow_vbo? 2: 3 );
+	R_RenderFullbrights( allow_vbo );
+	R_RenderDetails( allow_vbo ? 2 : 3 );
+
+	if( gl_polyoffset_bmodels.value )
+		GL_PopPolygonOffset();
+
+	R_DrawTriangleOutlines();
 
 	// restore fog here
 	if( e->curstate.rendermode == kRenderTransAdd )
@@ -1767,17 +2005,9 @@ void R_DrawBrushModel( cl_entity_t *e )
 
 	if( r_showhull->value > 0.0f )
 	{
-		GLfloat factor, units;
-
-		pglGetFloatv( GL_POLYGON_OFFSET_FACTOR, &factor );
-		pglGetFloatv( GL_POLYGON_OFFSET_UNITS, &units );
-
-		pglPolygonOffset( 1.0f, 2.0f );
-		pglEnable( GL_POLYGON_OFFSET_FILL );
+		GL_PushPolygonOffset( 1.0f, 2.0f );
 		gEngfuncs.R_DrawModelHull( clmodel );	// draw before restore
-		pglDisable( GL_POLYGON_OFFSET_FILL );
-
-		pglPolygonOffset( factor, units );
+		GL_PopPolygonOffset();
 	}
 
 	R_LoadIdentity();	// restore worldmatrix
@@ -2022,7 +2252,7 @@ void R_GenerateVBO( void )
 				if( surf->lightmaptexturenum != k )
 					continue;
 
-				if( surf->flags & ( SURF_DRAWSKY | SURF_DRAWTURB | SURF_CONVEYOR | SURF_DRAWTURB_QUADS ) )
+				if( surf->flags & ( SURF_DRAWSKY | SURF_DRAWTURB | SURF_CONVEYOR | SURF_DRAWTURB_QUADS | SURF_TRANSPARENT ) )
 					continue;
 
 				if( R_TextureAnimation( surf ) != world->textures[j] )
@@ -2093,7 +2323,7 @@ void R_GenerateVBO( void )
 				if( surf->lightmaptexturenum != k )
 					continue;
 
-				if( surf->flags & ( SURF_DRAWSKY | SURF_DRAWTURB | SURF_CONVEYOR | SURF_DRAWTURB_QUADS ) )
+				if( surf->flags & ( SURF_DRAWSKY | SURF_DRAWTURB | SURF_CONVEYOR | SURF_DRAWTURB_QUADS | SURF_TRANSPARENT ) )
 					continue;
 
 				if( R_TextureAnimation( surf ) != world->textures[j] )
@@ -2398,13 +2628,12 @@ static texture_t *R_SetupVBOTexture( texture_t *tex, int number )
 	}
 	else R_DisableDetail();
 
-	GL_Bind( mtst.tmu_gl, r_lightmap->value ?tr.whiteTexture:tex->gl_texturenum );
-	if(number)
+	GL_Bind( mtst.tmu_gl, r_lightmap->value ? tr.whiteTexture : tex->gl_texturenum );
+	if( number )
 		vboarray.itexture = number;
 
 	return tex;
 }
-
 
 static void R_SetupVBOArrayStatic( vboarray_t *vbo, qboolean drawlightmap, qboolean drawtextures )
 {
@@ -2419,7 +2648,6 @@ static void R_SetupVBOArrayStatic( vboarray_t *vbo, qboolean drawlightmap, qbool
 			pglEnableClientState( GL_VERTEX_ARRAY );
 			pglVertexPointer( 3, GL_FLOAT, sizeof( vbovertex_t ), (void*)offsetof(vbovertex_t,pos) );
 		}
-
 
 		// setup multitexture
 		if( drawtextures && vboarray.tstate != VBO_TEXTURE_MAIN )
@@ -2449,11 +2677,8 @@ static void R_SetupVBOArrayStatic( vboarray_t *vbo, qboolean drawlightmap, qbool
 	}
 }
 
-
-
 static void R_SetupVBOArrayDlight( vboarray_t *vbo, texture_t *texture )
 {
-
 	if( vboarray.astate != VBO_ARRAY_DLIGHT )
 	{
 		if( vboarray.astate == VBO_ARRAY_DECAL_DLIGHT )
@@ -2520,7 +2745,6 @@ static void R_SetupVBOArrayDecalDlight( int decalcount )
 	vboarray.tstate = VBO_TEXTURE_DECAL;
 	vboarray.lstate = VBO_LIGHTMAP_DYNAMIC;
 }
-
 
 /*
 ===================
@@ -2589,10 +2813,8 @@ static void R_AdditionalPasses( vboarray_t *vbo, int indexlen, void *indexarray,
 	}
 }
 
-
 #define MINIMIZE_UPLOAD
 #define DISCARD_DLIGHTS
-
 
 static void R_DrawDlightedDecals( vboarray_t *vbo, msurface_t *newsurf, msurface_t *surf, int decalcount, texture_t *texture )
 {
@@ -2628,7 +2850,9 @@ static void R_DrawDlightedDecals( vboarray_t *vbo, msurface_t *newsurf, msurface
 				if( glt->fogParams[3] > 230 )
 					pglTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE );
 				else pglTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE );
-				pglBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
+				if( FBitSet( glt->flags, TF_PREMULTIPLIED ))
+					pglBlendFunc( GL_ONE, GL_ONE_MINUS_SRC_ALPHA );
+				else pglBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
 			}
 			else
 			{
@@ -2802,7 +3026,6 @@ static void R_DrawVBODlights( vboarray_t *vbo, vbotexture_t *vbotex, texture_t *
 			uint indexbase = vbos.surfdata[((char*)surf - (char*)WORLDMODEL->surfaces) / sizeof( *surf )].startindex;
 			uint index;
 			mextrasurf_t *info; // this stores current dlight offset
-			decal_t *pdecal;
 			int sample_size;
 
 			info = surf->info;
@@ -3020,7 +3243,6 @@ static void R_DrawStaticDecals( vboarray_t *vbo, qboolean drawlightmap, int ilig
 
 	pglDepthMask( GL_FALSE );
 	pglEnable( GL_BLEND );
-	pglEnable( GL_POLYGON_OFFSET_FILL );
 
 	if( RI.currententity->curstate.rendermode == kRenderTransAlpha )
 		pglDisable( GL_ALPHA_TEST );
@@ -3052,7 +3274,9 @@ static void R_DrawStaticDecals( vboarray_t *vbo, qboolean drawlightmap, int ilig
 				if( glt->fogParams[3] > 230 )
 					pglTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE );
 				else pglTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE );
-				pglBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
+				if( FBitSet( glt->flags, TF_PREMULTIPLIED ))
+					pglBlendFunc( GL_ONE, GL_ONE_MINUS_SRC_ALPHA );
+				else pglBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
 			}
 			else
 			{
@@ -3086,7 +3310,6 @@ static void R_DrawStaticDecals( vboarray_t *vbo, qboolean drawlightmap, int ilig
 	// prepare for next texture
 	pglDepthMask( GL_TRUE );
 	pglDisable( GL_BLEND );
-	pglDisable( GL_POLYGON_OFFSET_FILL );
 
 	R_SetupVBOArrayStatic( vbo, drawlightmap, true );
 
@@ -3226,11 +3449,19 @@ void R_DrawVBO( qboolean drawlightmap, qboolean drawtextures )
 
 		if( drawtextures && drawlightmap && vbos.decaldata->lm[k] )
 		{
+			if( gl_polyoffset.value )
+				GL_PushPolygonOffset( -1.0f, -gl_polyoffset.value );
+
 			R_DrawStaticDecals( vbo, drawlightmap, k );
+
+			if( gl_polyoffset.value )
+				GL_PopPolygonOffset();
 		}
+
 		if( !drawtextures || !drawlightmap )
 			vbos.decaldata->lm[k] = NULL;
 	}
+
 	// Assert( !vbo->next );
 	R_ClearVBOState( drawlightmap, drawtextures );
 
@@ -3329,14 +3560,6 @@ R_RecursiveWorldNode
 */
 static void R_RecursiveWorldNode( mnode_t *node, uint clipflags )
 {
-	int		i, clipped;
-	msurface_t	*surf, **mark;
-	mleaf_t		*pleaf;
-	int		c, side;
-	float		dot;
-	mnode_t *children[2];
-	int numsurfaces, firstsurface;
-
 loc0:
 	if( node->contents == CONTENTS_SOLID )
 		return; // hit a solid leaf
@@ -3346,14 +3569,14 @@ loc0:
 
 	if( clipflags && !r_nocull.value )
 	{
-		for( i = 0; i < 6; i++ )
+		for( int i = 0; i < 6; i++ )
 		{
 			const mplane_t	*p = &RI.frustum.planes[i];
 
 			if( !FBitSet( clipflags, BIT( i )))
 				continue;
 
-			clipped = BoxOnPlaneSide( node->minmaxs, node->minmaxs + 3, p );
+			int clipped = BOX_ON_PLANE_SIDE( node->minmaxs, node->minmaxs + 3, p );
 			if( clipped == 2 ) return;
 			if( clipped == 1 ) ClearBits( clipflags, BIT( i ));
 		}
@@ -3362,19 +3585,11 @@ loc0:
 	// if a leaf node, draw stuff
 	if( node->contents < 0 )
 	{
-		pleaf = (mleaf_t *)node;
+		mleaf_t *pleaf = (mleaf_t *)node;
+		msurface_t **mark = pleaf->firstmarksurface;
 
-		mark = pleaf->firstmarksurface;
-		c = pleaf->nummarksurfaces;
-
-		if( c )
-		{
-			do
-			{
-				(*mark)->visframe = tr.framecount;
-				mark++;
-			} while( --c );
-		}
+		for( int i = 0; i < pleaf->nummarksurfaces; i++ )
+			mark[i]->visframe = tr.framecount;
 
 		// deal with model fragments in this leaf
 		if( pleaf->efrags )
@@ -3387,19 +3602,20 @@ loc0:
 	// node is just a decision point, so go down the apropriate sides
 
 	// find which side of the node we are on
-	dot = PlaneDiff( tr.modelorg, node->plane );
-	side = (dot >= 0.0f) ? 0 : 1;
+	float dot = PlaneDiff( tr.modelorg, node->plane );
+	int side = (dot >= 0.0f) ? 0 : 1;
 
 	// recurse down the children, front side first
-	node_children( children, node, WORLDMODEL );
-	R_RecursiveWorldNode( children[side], clipflags );
+	R_RecursiveWorldNode( node_child( node, side, WORLDMODEL ), clipflags );
 
-	firstsurface = node_firstsurface( node, WORLDMODEL );
-	numsurfaces = node_numsurfaces( node, WORLDMODEL );
+	int firstsurface = node_firstsurface( node, WORLDMODEL );
+	int numsurfaces = node_numsurfaces( node, WORLDMODEL );
 
 	// draw stuff
-	for( c = numsurfaces, surf = WORLDMODEL->surfaces + firstsurface; c; c--, surf++ )
+	for( int i = firstsurface; i < firstsurface + numsurfaces; i++ )
 	{
+		msurface_t *surf = &WORLDMODEL->surfaces[i];
+
 		if( R_CullSurface( surf, &RI.frustum, clipflags ))
 			continue;
 
@@ -3417,7 +3633,7 @@ loc0:
 	}
 
 	// recurse down the back side
-	node = children[!side];
+	node = node_child( node, !side, WORLDMODEL );
 	goto loc0;
 }
 
@@ -3493,7 +3709,6 @@ static void R_DrawWorldTopView( mnode_t *node, uint clipflags )
 
 	do
 	{
-		mnode_t *children[2];
 		int numsurfaces, firstsurface;
 
 		if( node->contents == CONTENTS_SOLID )
@@ -3511,7 +3726,7 @@ static void R_DrawWorldTopView( mnode_t *node, uint clipflags )
 				if( !FBitSet( clipflags, BIT( i )))
 					continue;
 
-				clipped = BoxOnPlaneSide( node->minmaxs, node->minmaxs + 3, p );
+				clipped = BOX_ON_PLANE_SIDE( node->minmaxs, node->minmaxs + 3, p );
 				if( clipped == 2 ) return;
 				if( clipped == 1 ) ClearBits( clipflags, BIT( i ));
 			}
@@ -3551,67 +3766,9 @@ static void R_DrawWorldTopView( mnode_t *node, uint clipflags )
 		}
 
 		// recurse down both children, we don't care the order...
-		node_children( children, node, WORLDMODEL );
-		R_DrawWorldTopView( children[0], clipflags );
-		node = children[1];
+		R_DrawWorldTopView( node_child( node, 0, WORLDMODEL ), clipflags );
+		node = node_child( node, 1, WORLDMODEL );
 	} while( node );
-}
-
-/*
-=============
-R_DrawTriangleOutlines
-=============
-*/
-static void R_DrawTriangleOutlines( void )
-{
-	int		i, j;
-	msurface_t	*surf;
-	glpoly2_t		*p;
-	float		*v;
-
-	if( !gl_wireframe.value )
-		return;
-
-	pglDisable( GL_TEXTURE_2D );
-	pglDisable( GL_DEPTH_TEST );
-	pglColor4f( 1.0f, 1.0f, 1.0f, 1.0f );
-	pglPolygonMode( GL_FRONT_AND_BACK, GL_LINE );
-
-	// render static surfaces first
-	for( i = 0; i < MAX_LIGHTMAPS; i++ )
-	{
-		for( surf = gl_lms.lightmap_surfaces[i]; surf != NULL; surf = surf->info->lightmapchain )
-		{
-			p = surf->polys;
-			for( ; p != NULL; p = p->chain )
-			{
-				pglBegin( GL_POLYGON );
-				v = p->verts[0];
-				for( j = 0; j < p->numverts; j++, v += VERTEXSIZE )
-					pglVertex3fv( v );
-				pglEnd ();
-			}
-		}
-	}
-
-	// render surfaces with dynamic lightmaps
-	for( surf = gl_lms.dynamic_surfaces; surf != NULL; surf = surf->info->lightmapchain )
-	{
-		p = surf->polys;
-
-		for( ; p != NULL; p = p->chain )
-		{
-			pglBegin( GL_POLYGON );
-			v = p->verts[0];
-			for( j = 0; j < p->numverts; j++, v += VERTEXSIZE )
-				pglVertex3fv( v );
-			pglEnd ();
-		}
-	}
-
-	pglPolygonMode( GL_FRONT_AND_BACK, GL_FILL );
-	pglEnable( GL_DEPTH_TEST );
-	pglEnable( GL_TEXTURE_2D );
 }
 
 /*
@@ -3630,7 +3787,7 @@ void R_DrawWorld( void )
 		return;
 
 	RI.currentmodel = RI.currententity->model;
-	if( !RI.drawWorld || RI.onlyClientDraw )
+	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ) || FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
 		return;
 
 	VectorCopy( RI.cullorigin, tr.modelorg );
@@ -3646,7 +3803,7 @@ void R_DrawWorld( void )
 	R_ClearSkyBox ();
 
 	start = gEngfuncs.pfnTime();
-	if( RI.drawOrtho )
+	if( FBitSet( RI.rvp.flags, RF_DRAW_OVERVIEW ))
 		R_DrawWorldTopView( WORLDMODEL->nodes, RI.frustum.clipFlags );
 	else R_RecursiveWorldNode( WORLDMODEL->nodes, RI.frustum.clipFlags );
 	end = gEngfuncs.pfnTime();
@@ -3662,8 +3819,9 @@ void R_DrawWorld( void )
 		DrawDecalsBatch();
 		GL_ResetFogColor();
 		R_BlendLightmaps();
-		R_RenderFullbrights();
+		R_RenderFullbrights( R_HasEnabledVBO( ));
 		R_RenderDetails( R_HasEnabledVBO() ? 2 : 3 );
+		R_DrawTriangleOutlines();
 
 		if( skychain )
 			R_DrawSkyBox();
@@ -3674,8 +3832,6 @@ void R_DrawWorld( void )
 	r_stats.t_world_draw = end - start;
 	tr.num_draw_decals = 0;
 	skychain = NULL;
-
-	R_DrawTriangleOutlines ();
 
 	gEngfuncs.R_DrawWorldHull();
 }
@@ -3696,7 +3852,8 @@ void R_MarkLeaves( void )
 	vec3_t	test;
 	int	i;
 
-	if( !RI.drawWorld ) return;
+	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
+		return;
 
 	if( FBitSet( r_novis.flags, FCVAR_CHANGED ) || tr.fResetVis )
 	{
@@ -3706,21 +3863,17 @@ void R_MarkLeaves( void )
 		RI.viewleaf = NULL;
 	}
 
-	VectorCopy( RI.pvsorigin, test );
+	VectorCopy( RI.rvp.vieworigin, test );
 
 	if( RI.viewleaf != NULL )
 	{
 		// merge two leafs that can be a crossed-line contents
 		if( RI.viewleaf->contents == CONTENTS_EMPTY )
-		{
-			VectorSet( test, RI.pvsorigin[0], RI.pvsorigin[1], RI.pvsorigin[2] - 16.0f );
-			leaf = gEngfuncs.Mod_PointInLeaf( test, WORLDMODEL->nodes );
-		}
+			VectorSet( test, RI.rvp.vieworigin[0], RI.rvp.vieworigin[1], RI.rvp.vieworigin[2] - 16.0f );
 		else
-		{
-			VectorSet( test, RI.pvsorigin[0], RI.pvsorigin[1], RI.pvsorigin[2] + 16.0f );
-			leaf = gEngfuncs.Mod_PointInLeaf( test, WORLDMODEL->nodes );
-		}
+			VectorSet( test, RI.rvp.vieworigin[0], RI.rvp.vieworigin[1], RI.rvp.vieworigin[2] + 16.0f );
+
+		leaf = gEngfuncs.Mod_PointInLeaf( test, WORLDMODEL->nodes, WORLDMODEL );
 
 		if(( leaf->contents != CONTENTS_SOLID ) && ( RI.viewleaf != leaf ))
 			force = true;
@@ -3736,11 +3889,12 @@ void R_MarkLeaves( void )
 	RI.oldviewleaf = RI.viewleaf;
 	tr.visframecount++;
 
-	if( r_novis.value || RI.drawOrtho || !RI.viewleaf || !WORLDMODEL->visdata )
+	if( r_novis.value || FBitSet( RI.rvp.flags, RF_DRAW_OVERVIEW ) || !RI.viewleaf || !WORLDMODEL->visdata )
 		novis = true;
 
-	gEngfuncs.R_FatPVS( RI.pvsorigin, REFPVS_RADIUS, RI.visbytes, FBitSet( RI.params, RP_OLDVIEWLEAF ), novis );
-	if( force && !novis ) gEngfuncs.R_FatPVS( test, REFPVS_RADIUS, RI.visbytes, true, novis );
+	gEngfuncs.R_FatPVS( RI.rvp.vieworigin, r_pvs_radius->value, RI.visbytes, false, novis );
+	if( force && !novis )
+		gEngfuncs.R_FatPVS( test, r_pvs_radius->value, RI.visbytes, true, novis );
 
 	for( i = 0; i < WORLDMODEL->numleafs; i++ )
 	{
@@ -3794,7 +3948,7 @@ static void GL_CreateSurfaceLightmap( msurface_t *surf, model_t *loadmodel )
 	base = gl_lms.lightmap_buffer;
 	base += ( surf->light_t * BLOCK_SIZE + surf->light_s ) * 4;
 
-	R_SetCacheState( surf );
+	R_UpdateSurfaceCachedLight( surf );
 	R_BuildLightMap( surf, base, BLOCK_SIZE * 4, false );
 }
 
@@ -3909,7 +4063,10 @@ void GL_BuildLightmaps( void )
 			GL_CreateSurfaceLightmap( m->surfaces + j, m );
 
 			if( m->surfaces[j].flags & SURF_DRAWTURB )
+			{
+				GL_BuildLightmapWater( m, m->surfaces + j );
 				continue;
+			}
 
 			nColinElim += GL_BuildPolygonFromSurface( m, m->surfaces + j );
 		}
@@ -3930,17 +4087,3 @@ void GL_BuildLightmaps( void )
 	}
 }
 
-void GL_InitRandomTable( void )
-{
-	int	tu, tv;
-
-	for( tu = 0; tu < MOD_FRAMES; tu++ )
-	{
-		for( tv = 0; tv < MOD_FRAMES; tv++ )
-		{
-			rtable[tu][tv] = gEngfuncs.COM_RandomLong( 0, 0x7FFF );
-		}
-	}
-
-	gEngfuncs.COM_SetRandomSeed( 0 );
-}

@@ -12,13 +12,10 @@ but WITHOUT ANY WARRANTY; without even the implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 GNU General Public License for more details.
 */
-#include <string.h>
-#include <stdio.h>
 #include <time.h>
 #include <stdarg.h>
 #include ALLOCA_H
 #include "crtlib.h"
-#include "filesystem.h"
 #include "filesystem_internal.h"
 #include "VFileSystem009.h"
 #include "common/com_strings.h"
@@ -58,7 +55,7 @@ static inline const char *IdToDir( char *dir, size_t size, const char *id )
 
 	if( !Q_strcmp( id, "GAMEDOWNLOAD" ))
 	{
-		Q_snprintf( dir, size, "%s/" DEFAULT_DOWNLOADED_DIRECTORY , GI->gamefolder );
+		Q_snprintf( dir, size, "%s" DEFAULT_DOWNLOADED_DIRECTORY_SUFFIX, GI->gamefolder );
 		return dir;
 	}
 
@@ -412,7 +409,8 @@ public:
 		qboolean qquoted;
 		char *p;
 
-		p = COM_ParseFileSafe( buf, token, PFILE_FS_TOKEN_MAX_LENGTH, 0, nullptr, &qquoted );
+		// filesystem_stdio expects 512 byte buffers
+		p = COM_ParseFileSafe( buf, token, 512, 0, nullptr, &qquoted );
 
 		if( quoted )
 			*quoted = qquoted;
@@ -422,7 +420,7 @@ public:
 
 	bool FullPathToRelativePath( const char *path, char *out ) override
 	{
-		if( !COM_CheckString( path ))
+		if( COM_StringEmptyOrNULL( path ))
 		{
 			*out = 0;
 			return false;

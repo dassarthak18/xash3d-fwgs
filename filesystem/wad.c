@@ -49,8 +49,6 @@ infotable	dlumpinfo_t[dwadinfo_t->numlumps]
 #define HINT_NAMELEN	5	// e.g. _mask, _norm
 #define MAX_FILES_IN_WAD	65535	// real limit as above <2Gb size not a lumpcount
 
-#include "const.h"
-
 struct wfile_s
 {
 	int		infotableofs;
@@ -100,7 +98,7 @@ static signed char W_TypeFromExt( const char *lumpname )
 	int i;
 
 	// we not known about filetype, so match only by filename
-	if( !Q_strcmp( ext, "*" ) || !COM_CheckStringEmpty( ext ))
+	if( !Q_strcmp( ext, "*" ) || COM_StringEmpty( ext ))
 		return TYP_ANY;
 
 	for( i = 0; i < sizeof( wad_types ) / sizeof( wad_types[0] ); i++ )
@@ -305,13 +303,17 @@ static wfile_t *W_Open( const char *filename, int *error, uint flags )
 		return NULL;
 	}
 
-	if( header.ident != IDWAD2HEADER && header.ident != IDWAD3HEADER )
+	if( header.ident != LittleLong( IDWAD2HEADER ) && header.ident != LittleLong( IDWAD3HEADER ))
 	{
 		Con_Reportf( S_ERROR "%s: %s is not a WAD2 or WAD3 file\n", __func__, filename );
 		if( error ) *error = WAD_LOAD_BAD_HEADER;
 		FS_CloseWAD( wad );
 		return NULL;
 	}
+
+	header.ident = LittleLong( header.ident );
+	header.numlumps = LittleLong( header.numlumps );
+	header.infotableofs = LittleLong( header.infotableofs );
 
 	lumpcount = header.numlumps;
 
@@ -351,6 +353,13 @@ static wfile_t *W_Open( const char *filename, int *error, uint flags )
 		Mem_Free( srclumps );
 		FS_CloseWAD( wad );
 		return NULL;
+	}
+
+	for( i = 0; i < lumpcount; i++ )
+	{
+		srclumps[i].filepos = LittleLong( srclumps[i].filepos );
+		srclumps[i].disksize = LittleLong( srclumps[i].disksize );
+		srclumps[i].size = LittleLong( srclumps[i].size );
 	}
 
 	// starting to add lumps
@@ -428,7 +437,7 @@ static int FS_FindFile_WAD( searchpath_t *search, const char *path, char *fixedn
 
 	COM_ExtractFilePath( path, wadname );
 
-	if( COM_CheckStringEmpty( wadname ))
+	if( !COM_StringEmpty( wadname ))
 	{
 		string wadbasename;
 
@@ -485,7 +494,7 @@ static void FS_Search_WAD( searchpath_t *search, stringlist_t *list, const char 
 	COM_FileBase( pattern, wadpattern, sizeof( wadpattern ));
 	wadfolder[0] = '\0';
 
-	if( COM_CheckStringEmpty( wadname ))
+	if( !COM_StringEmpty( wadname ))
 	{
 		string wadbasename;
 

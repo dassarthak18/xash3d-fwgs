@@ -19,7 +19,6 @@ GNU General Public License for more details.
 #include "mod_local.h"
 #include "xash3d_mathlib.h"
 #include "world.h"
-#include "eiface.h" // offsetof
 
 #define MAX_CLIPNODE_DEPTH		256	// should never exceeds
 
@@ -41,7 +40,7 @@ GNU General Public License for more details.
 
 #define LIST_HEAD_INIT( name ) { &(name), &(name) }
 
-_inline void list_add__( hullnode_t *new, hullnode_t *prev, hullnode_t *next )
+static inline void list_add__( hullnode_t *new, hullnode_t *prev, hullnode_t *next )
 {
 	next->prev = new;
 	new->next = next;
@@ -50,18 +49,12 @@ _inline void list_add__( hullnode_t *new, hullnode_t *prev, hullnode_t *next )
 }
 
 // add the new entry after the give list entry
-_inline void list_add( hullnode_t *newobj, hullnode_t *head )
+static inline void list_add( hullnode_t *newobj, hullnode_t *head )
 {
 	list_add__( newobj, head, head->next );
 }
 
-// add the new entry before the given list entry (list is circular)
-_inline void list_add_tail( hullnode_t *newobj, hullnode_t *head )
-{
-	list_add__( newobj, head->prev, head );
-}
-
-_inline void list_del( hullnode_t *entry )
+static inline void list_del( hullnode_t *entry )
 {
 	entry->next->prev = entry->prev;
 	entry->prev->next = entry->next;
@@ -707,7 +700,7 @@ static void Mod_CreatePolygonsForHull( int hullnum )
 		Mod_InitDebugHulls( mod ); // FIXME: build hulls for separate bmodels (shells, medkits etc)
 
 	Con_Printf( "generating polygons for hull %u...\n", hullnum );
-	start = Sys_DoubleTime();
+	start = Platform_DoubleTime();
 
 	// rebuild hulls list
 	for( i = 0; i < world.num_hull_models; i++ )
@@ -718,7 +711,7 @@ static void Mod_CreatePolygonsForHull( int hullnum )
 		Q_snprintf( name, sizeof( name ), "*%i", i + 1 );
 		mod = Mod_FindName( name, false );
 	}
-	end = Sys_DoubleTime();
+	end = Platform_DoubleTime();
 	Con_Printf( "build time %.3f secs\n", end - start );
 }
 

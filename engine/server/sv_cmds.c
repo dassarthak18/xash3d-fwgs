@@ -247,7 +247,7 @@ static void SV_Maps_f( void )
 		return;
 	}
 
-	nummaps = Cmd_ListMaps( mapList, NULL, 0 );
+	nummaps = Cmd_ListMaps( mapList, NULL, 0, false );
 
 	Mem_Free( mapList );
 
@@ -264,6 +264,12 @@ Set background map (enable physics in menu)
 static void SV_MapBackground_f( void )
 {
 	char	mapname[MAX_QPATH];
+
+	if( Host_IsDedicated( ))
+	{
+		Con_Printf( S_ERROR "no background maps are allowed in dedicated mode" );
+		return;
+	}
 
 	if( Cmd_Argc() != 2 )
 	{
@@ -413,7 +419,7 @@ SV_QuickLoad_f
 */
 static void SV_QuickLoad_f( void )
 {
-	Cbuf_AddText( "echo Quick Loading...; wait; load quick" );
+	Cbuf_AddText( "echo Quick Loading...; wait; load quick\n" );
 }
 
 /*
@@ -451,7 +457,7 @@ SV_QuickSave_f
 */
 static void SV_QuickSave_f( void )
 {
-	Cbuf_AddText( "echo Quick Saving...; wait; save quick" );
+	Cbuf_AddText( "echo Quick Saving...; wait; save quick\n" );
 }
 
 /*
@@ -696,11 +702,11 @@ static void SV_Status_f( void )
 		Q_strncpy( arch, Info_ValueForKey( cl->useragent, "a" ), sizeof( arch ));
 		buildnum = Q_atoi( Info_ValueForKey( cl->useragent, "b" ));
 
-		if( !COM_CheckStringEmpty( version ))
+		if( COM_StringEmpty( version ))
 			Q_strncpy( version, "n/a", sizeof( version ));
-		if( !COM_CheckStringEmpty( os ))
+		if( COM_StringEmpty( os ))
 			Q_strncpy( os, "n/a", sizeof( os ));
-		if( !COM_CheckStringEmpty( arch ))
+		if( COM_StringEmpty( arch ))
 			Q_strncpy( arch, "n/a", sizeof( arch ));
 
 		Con_Printf( "%2i %5i %4s %4s %.5f %5i %s (%s-%s %i)\t%8s\t%8s\n",
@@ -949,25 +955,25 @@ static void SV_EntityInfo_f( void )
 
 	for( i = 0; i < svgame.numEntities; i++ )
 	{
-		ent = EDICT_NUM( i );
+		ent = SV_EdictNum( i );
 		if( !SV_IsValidEdict( ent )) continue;
 
 		Con_Printf( "%5i origin: %.f %.f %.f", i, ent->v.origin[0], ent->v.origin[1], ent->v.origin[2] );
 
 		if( ent->v.classname )
-			Con_Printf( ", class: %s", STRING( ent->v.classname ));
+			Con_Printf( ", class: %s", SV_GetString( ent->v.classname ));
 
 		if( ent->v.globalname )
-			Con_Printf( ", global: %s", STRING( ent->v.globalname ));
+			Con_Printf( ", global: %s", SV_GetString( ent->v.globalname ));
 
 		if( ent->v.targetname )
-			Con_Printf( ", name: %s", STRING( ent->v.targetname ));
+			Con_Printf( ", name: %s", SV_GetString( ent->v.targetname ));
 
 		if( ent->v.target )
-			Con_Printf( ", target: %s", STRING( ent->v.target ));
+			Con_Printf( ", target: %s", SV_GetString( ent->v.target ));
 
 		if( ent->v.model )
-			Con_Printf( ", model: %s", STRING( ent->v.model ));
+			Con_Printf( ", model: %s", SV_GetString( ent->v.model ));
 
 		Con_Printf( "\n" );
 	}
@@ -1004,7 +1010,7 @@ static void SV_ListMessages_f( void )
 	Con_Printf( "num size name\n" );
 	for( i = 1; i < MAX_USER_MESSAGES; i++ )
 	{
-		if( !COM_CheckStringEmpty( svgame.msg[i].name ))
+		if( COM_StringEmpty( svgame.msg[i].name ))
 			break;
 
 		Con_Printf( "%3d\t%3d\t%s\n", svgame.msg[i].number, svgame.msg[i].size, svgame.msg[i].name );

@@ -84,37 +84,37 @@ void Sound_Shutdown( void )
 
 uint GAME_EXPORT Sound_GetApproxWavePlayLen( const char *filepath )
 {
-	string    name;
-	file_t    *f;
-	wavehdr_t wav;
-	size_t    filesize;
-	uint      msecs;
-
+	string name;
 	Q_strncpy( name, filepath, sizeof( name ));
 	COM_FixSlashes( name );
 
-	f = FS_Open( name, "rb", false );
+	file_t *f = FS_Open( name, "rb", false );
 	if( !f )
 		return 0;
 
+	wavehdr_t wav;
 	if( FS_Read( f, &wav, sizeof( wav )) != sizeof( wav ))
 	{
 		FS_Close( f );
 		return 0;
 	}
 
-	filesize = FS_FileLength( f );
-	filesize -= 128; // magic number from GoldSrc, seems to be header size
+	// magic number from GoldSrc, seems to be header size
+	size_t filesize = FS_FileLength( f ) - 128;
 
 	FS_Close( f );
 
 	// is real wav file ?
-	if( wav.riff_id != RIFFHEADER || wav.wave_id != WAVEHEADER || wav.fmt_id != FORMHEADER )
+	if( wav.riff_id != LittleLong( RIFFHEADER ) || wav.wave_id != LittleLong( WAVEHEADER ) || wav.fmt_id != LittleLong( FORMHEADER ))
 		return 0;
 
-	if( wav.nAvgBytesPerSec >= 1000 )
-		msecs = (uint)((float)filesize / ((float)wav.nAvgBytesPerSec / 1000.0f));
-	else msecs = (uint)(((float)filesize / (float)wav.nAvgBytesPerSec) * 1000.0f);
+	int avgBytes = LittleLong( wav.nAvgBytesPerSec );
+	uint msecs;
+
+	if( avgBytes >= 1000 )
+		msecs = (uint)((float)filesize / ((float)avgBytes / 1000.0f));
+	else
+		msecs = (uint)(((float)filesize / (float)avgBytes) * 1000.0f);
 
 	return msecs;
 }
@@ -370,7 +370,7 @@ static qboolean Sound_ResampleInternal( wavdata_t *sc, int outrate, int outwidth
 	if( inrate == outrate && inwidth == outwidth && inchannels == outchannels )
 		return false;
 
-	t1 = Sys_DoubleTime();
+	t1 = Platform_DoubleTime();
 
 	stepscale = (double)inrate / outrate;	// this is usually 0.5, 1, or 2
 	outcount = sc->samples / stepscale;
@@ -379,7 +379,7 @@ static qboolean Sound_ResampleInternal( wavdata_t *sc, int outrate, int outwidth
 
 	sc->samples = outcount;
 	if( FBitSet( sc->flags, SOUND_LOOPED ))
-		sc->loopStart = sc->loopStart / stepscale;
+		sc->loop_start = sc->loop_start / stepscale;
 
 	sound.tempbuffer = (byte *)Mem_Realloc( host.soundpool, sound.tempbuffer, sc->size );
 
@@ -404,7 +404,7 @@ static qboolean Sound_ResampleInternal( wavdata_t *sc, int outrate, int outwidth
 		return false;
 	}
 
-	t2 = Sys_DoubleTime();
+	t2 = Platform_DoubleTime();
 	sc->rate = outrate;
 	sc->width = outwidth;
 
@@ -447,7 +447,7 @@ qboolean Sound_Process( wavdata_t **wav, int rate, int width, int channels, uint
 qboolean Sound_SupportedFileFormat( const char *fileext )
 {
 	const loadwavfmt_t *format;
-	if( COM_CheckStringEmpty( fileext ))
+	if( !COM_StringEmpty( fileext ))
 	{
 		for( format = sound.loadformats; format && format->ext; format++ )
 		{

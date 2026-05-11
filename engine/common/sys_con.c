@@ -23,6 +23,9 @@ GNU General Public License for more details.
 #include <sys/time.h>
 #endif
 #include "xash3d_mathlib.h"
+#if XASH_WIN32
+#include <io.h>
+#endif
 
 // do not waste precious CPU cycles on mobiles or low memory devices
 #if !XASH_WIN32 && !XASH_MOBILE_PLATFORM && !XASH_LOW_MEMORY && !XASH_EMSCRIPTEN
@@ -58,6 +61,8 @@ SYSTEM LOG
 */
 int Sys_LogFileNo( void )
 {
+	if( !s_ld.logfile )
+		return -1;
 	return s_ld.logfileno;
 }
 
@@ -81,7 +86,7 @@ void Sys_InitLog( void )
 
 	if( Sys_CheckParm( "-log" ))
 	{
-		if( !Sys_GetParmFromCmdLine( "-log", s_ld.log_path ) || !isalnum( s_ld.log_path[0] ))
+		if( !Sys_GetParmFromCmdLine( "-log", s_ld.log_path ) || !isalnum((byte)s_ld.log_path[0] ))
 			Q_strncpy( s_ld.log_path, "engine.log", sizeof( s_ld.log_path ));
 
 		COM_DefaultExtension( s_ld.log_path, ".log", sizeof( s_ld.log_path ));
@@ -101,7 +106,17 @@ void Sys_InitLog( void )
 	// create log if needed
 	if( s_ld.log_active )
 	{
-		s_ld.logfile = fopen( s_ld.log_path, mode );
+		const char *basedir = getenv( "XASH3D_BASEDIR" );
+
+		if( !COM_StringEmptyOrNULL( basedir ) && s_ld.log_path[0] != '/' )
+		{
+			char fullpath[MAX_SYSPATH];
+			Q_snprintf( fullpath, sizeof( fullpath ), "%s/%s", basedir, s_ld.log_path );
+			s_ld.logfile = fopen( fullpath, mode );
+		}
+
+		if( !s_ld.logfile )
+			s_ld.logfile = fopen( s_ld.log_path, mode );
 
 		if ( !s_ld.logfile )
 		{

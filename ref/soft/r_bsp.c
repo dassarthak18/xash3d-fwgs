@@ -27,11 +27,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 vec3_t r_entorigin; // the currently rendering entity in world
 // coordinates
 
-float  entity_rotation[3][3];
+static float  entity_rotation[3][3];
 
 int    r_currentbkey;
-
-typedef enum {touchessolid, drawnode, nodrawnode} solidstate_t;
 
 #define MAX_BMODEL_VERTS 1000                   // 12K
 #define MAX_BMODEL_EDGES 2000                   // 24K
@@ -39,12 +37,8 @@ typedef enum {touchessolid, drawnode, nodrawnode} solidstate_t;
 static mvertex_t *pbverts;
 static bedge_t   *pbedges;
 static int       numbverts, numbedges;
-
 static mvertex_t *pfrontenter, *pfrontexit;
-
 static qboolean  makeclippededge;
-
-
 
 /*
 ================
@@ -365,7 +359,7 @@ void R_DrawSolidClippedSubmodelPolygons( model_t *pmodel, mnode_t *topnode )
 
 	for( i = 0; i < numsurfaces; i++, psurf++ )
 	{
-		if( FBitSet( psurf->flags, SURF_DRAWTURB ) && !ENGINE_GET_PARM( PARM_QUAKE_COMPATIBLE ))
+		if( FBitSet( psurf->flags, SURF_DRAWTURB ) && !FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ))
 		{
 			if( psurf->plane->type != PLANE_Z && !FBitSet( RI.currententity->curstate.effects, EF_WATERSIDES ))
 				continue;
@@ -447,7 +441,7 @@ void R_DrawSubmodelPolygons( model_t *pmodel, int clipflags, mnode_t *topnode )
 
 	for( i = 0; i < numsurfaces; i++, psurf++ )
 	{
-		if( FBitSet( psurf->flags, SURF_DRAWTURB ) && !ENGINE_GET_PARM( PARM_QUAKE_COMPATIBLE ))
+		if( FBitSet( psurf->flags, SURF_DRAWTURB ) && !FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ))
 		{
 			if( psurf->plane->type != PLANE_Z && !FBitSet( RI.currententity->curstate.effects, EF_WATERSIDES ))
 				continue;
@@ -565,7 +559,6 @@ static void R_RecursiveWorldNode( mnode_t *node, int clipflags )
 	}
 	else
 	{
-		mnode_t    *children[2];
 		int firstsurface;
 
 		// node is just a decision point, so go down the apropriate sides
@@ -595,8 +588,7 @@ static void R_RecursiveWorldNode( mnode_t *node, int clipflags )
 			side = 1;
 
 		// recurse down the children, front side first
-		node_children( children, node, WORLDMODEL );
-		R_RecursiveWorldNode( children[side], clipflags );
+		R_RecursiveWorldNode( node_child( node, side, WORLDMODEL ), clipflags );
 
 		// draw stuff
 		c = node_numsurfaces( node, WORLDMODEL );
@@ -640,7 +632,7 @@ static void R_RecursiveWorldNode( mnode_t *node, int clipflags )
 		}
 
 		// recurse down the back side
-		R_RecursiveWorldNode( children[!side], clipflags );
+		R_RecursiveWorldNode( node_child( node, !side, WORLDMODEL ), clipflags );
 	}
 }
 
@@ -651,14 +643,14 @@ R_RenderWorld
 */
 void R_RenderWorld( void )
 {
-	if( !RI.drawWorld )
+	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
 		return;
 
 	// auto cycle the world frame for texture animation
 	RI.currententity = CL_GetEntityByIndex( 0 );
 	// RI.currententity->frame = (int)(gp_cl->time*2);
 
-	VectorCopy( RI.vieworg, tr.modelorg );
+	VectorCopy( RI.rvp.vieworigin, tr.modelorg );
 	RI.currentmodel = WORLDMODEL;
 	r_pcurrentvertbase = RI.currentmodel->vertexes;
 

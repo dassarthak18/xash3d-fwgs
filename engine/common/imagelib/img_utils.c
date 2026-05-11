@@ -285,66 +285,34 @@ int Image_ComparePalette( const byte *pal )
 
 static void Image_SetPalette( const byte *pal, uint *d_table )
 {
-	byte	rgba[4];
-	uint uirgba; // TODO: palette looks byte-swapped on big-endian
-	int	i;
-
-	// setup palette
 	switch( image.d_rendermode )
 	{
 	case LUMP_NORMAL:
-		for( i = 0; i < 256; i++ )
-		{
-			memcpy( rgba, &pal[i * 3], 3 );
-			rgba[3] = 0xFF;
-			memcpy( &uirgba, rgba, sizeof( uirgba ));
-			d_table[i] = uirgba;
-		}
+		for( int i = 0; i < 256; i++ )
+			d_table[i] = HostFourCC( pal[i * 3 + 0], pal[i * 3 + 1], pal[i * 3 + 2], 0xFF );
 		break;
 	case LUMP_TEXGAMMA:
-		for( i = 0; i < 256; i++ )
+		for( int i = 0; i < 256; i++ )
 		{
-			rgba[0] = TextureToGamma( pal[i * 3 + 0] );
-			rgba[1] = TextureToGamma( pal[i * 3 + 1] );
-			rgba[2] = TextureToGamma( pal[i * 3 + 2] );
-			rgba[3] = 0xFF;
-			memcpy( &uirgba, rgba, sizeof( uirgba ));
-			d_table[i] = uirgba;
+			d_table[i] = HostFourCC(
+				TextureToGamma( pal[i * 3 + 0] ),
+				TextureToGamma( pal[i * 3 + 1] ),
+				TextureToGamma( pal[i * 3 + 2] ),
+				0xFF );
 		}
 		break;
 	case LUMP_GRADIENT:
-		for( i = 0; i < 256; i++ )
-		{
-			rgba[0] = pal[765];
-			rgba[1] = pal[766];
-			rgba[2] = pal[767];
-			rgba[3] = i;
-			memcpy( &uirgba, rgba, sizeof( uirgba ));
-			d_table[i] = uirgba;
-		}
+		for( int i = 0; i < 256; i++ )
+			d_table[i] = HostFourCC( pal[765], pal[766], pal[767], i );
 		break;
 	case LUMP_MASKED:
-		for( i = 0; i < 255; i++ )
-		{
-			rgba[0] = pal[i*3+0];
-			rgba[1] = pal[i*3+1];
-			rgba[2] = pal[i*3+2];
-			rgba[3] = 0xFF;
-			memcpy( &uirgba, rgba, sizeof( uirgba ));
-			d_table[i] = uirgba;
-		}
+		for( int i = 0; i < 255; i++ )
+			d_table[i] = HostFourCC( pal[i * 3 + 0], pal[i * 3 + 1], pal[i * 3 + 2], 0xFF );
 		d_table[255] = 0;
 		break;
 	case LUMP_EXTENDED:
-		for( i = 0; i < 256; i++ )
-		{
-			rgba[0] = pal[i*4+0];
-			rgba[1] = pal[i*4+1];
-			rgba[2] = pal[i*4+2];
-			rgba[3] = pal[i*4+3];
-			memcpy( &uirgba, rgba, sizeof( uirgba ));
-			d_table[i] = uirgba;
-		}
+		for( int i = 0; i < 256; i++ )
+			d_table[i] = HostFourCC( pal[i * 4 + 0], pal[i * 4 + 1], pal[i * 4 + 2], pal[i * 4 + 3] );
 		break;
 	}
 }
@@ -616,7 +584,7 @@ qboolean Image_Copy8bitRGBA( const byte *in, byte *out, int pixels )
 	if( image.flags & IMAGE_HAS_LUMA )
 	{
 		for( i = 0; i < image.width * image.height; i++ )
-			fin[i] = fin[i] < 224 ? fin[i] : 0;
+			fin[i] = fin[i] < 224 ? fin[i] : image.black_pixel;
 	}
 
 	// check for color
@@ -1204,7 +1172,7 @@ static byte *Image_MakeLuma( byte *fin, int width, int height, int type, int fla
 	case PF_INDEXED_32:
 		out = image.tempbuffer = Mem_Realloc( host.imagepool, image.tempbuffer, width * height );
 		for( i = 0; i < width * height; i++ )
-			*out++ = fin[i] >= 224 ? fin[i] : 0;
+			*out++ = fin[i] >= 224 ? fin[i] : image.black_pixel;
 		break;
 	default:
 		// another formats does ugly result :(
@@ -1464,16 +1432,25 @@ qboolean Image_Process( rgbdata_t **pix, int width, int height, uint flags, floa
 	return result;
 }
 
-// This codebase has too many copies of this function:
-// - ref_gl has one
-// - ref_vk has one
-// - ref_soft has one
-// - many more places probably have one too
-// TODO figure out how to make it available for ref_*
+/*
+============
+Image_ComputeSize
+============
+*/
 size_t Image_ComputeSize( int type, int width, int height, int depth )
 {
+	depth = Q_max( 1, depth );
+
 	switch( type )
 	{
+	case PF_LUMINANCE:
+		return ( width * height * depth );
+	case PF_BGR_24:
+	case PF_RGB_24:
+		return ( width * height * depth * 3 );
+	case PF_BGRA_32:
+	case PF_RGBA_32:
+		return ( width * height * depth * 4 );
 	case PF_DXT1:
 	case PF_BC4_SIGNED:
 	case PF_BC4_UNSIGNED:
@@ -1486,12 +1463,8 @@ size_t Image_ComputeSize( int type, int width, int height, int depth )
 	case PF_BC6H_SIGNED:
 	case PF_BC6H_UNSIGNED:
 	case PF_BC7_UNORM:
-	case PF_BC7_SRGB: return ((( width + 3 ) / 4 ) * (( height + 3 ) / 4 ) * depth * 16 );
-	case PF_LUMINANCE: return ( width * height * depth );
-	case PF_BGR_24:
-	case PF_RGB_24: return ( width * height * depth * 3 );
-	case PF_BGRA_32:
-	case PF_RGBA_32: return ( width * height * depth * 4 );
+	case PF_BC7_SRGB:
+		return ((( width + 3 ) / 4 ) * (( height + 3 ) / 4 ) * depth * 16 );
 	}
 
 	return 0;

@@ -72,7 +72,7 @@ static void SV_SendSingleResource( const char *name, resourcetype_t type, int in
 	resource_t	*pResource = &sv.resources[sv.num_resources];
 	int		nSize = 0;
 
-	if( !COM_CheckString( name ))
+	if( COM_StringEmptyOrNULL( name ))
 		return;
 
 	switch( type )
@@ -105,7 +105,7 @@ int SV_ModelIndex( const char *filename )
 	char	name[MAX_QPATH];
 	int	i;
 
-	if( !COM_CheckString( filename ))
+	if( COM_StringEmptyOrNULL( filename ))
 		return 0;
 
 	if( *filename == '\\' || *filename == '/' )
@@ -150,7 +150,7 @@ int GAME_EXPORT SV_SoundIndex( const char *filename )
 	char	name[MAX_QPATH];
 	int	i;
 
-	if( !COM_CheckString( filename ))
+	if( COM_StringEmptyOrNULL( filename ))
 		return 0;
 
 	if( filename[0] == '!' )
@@ -201,7 +201,7 @@ int SV_EventIndex( const char *filename )
 	char	name[MAX_QPATH];
 	int	i;
 
-	if( !COM_CheckString( filename ))
+	if( COM_StringEmptyOrNULL( filename ))
 		return 0;
 
 	Q_strncpy( name, filename, sizeof( name ));
@@ -243,7 +243,7 @@ int GAME_EXPORT SV_GenericIndex( const char *filename )
 	char	name[MAX_QPATH];
 	int	i;
 
-	if( !COM_CheckString( filename ))
+	if( COM_StringEmptyOrNULL( filename ))
 		return 0;
 
 	Q_strncpy( name, filename, sizeof( name ));
@@ -358,12 +358,11 @@ static void SV_CreateGenericResources( void )
 	SV_ReadResourceList( filename );
 	SV_ReadResourceList( "reslist.txt" );
 
-	for( i = 0; i < world.wadlist.count; i++ )
+	// precache wads so client can knows this map needs some extra wad files
+	for( i = 0; i < world.wadcount; i++ )
 	{
-		if( world.wadlist.wadusage[i] > 0 )
-		{
-			SV_GenericIndex( world.wadlist.wadnames[i] );
-		}
+		if( world.wadlist[i].usage > 0 )
+			SV_GenericIndex( world.wadlist[i].name );
 	}
 }
 
@@ -385,7 +384,7 @@ static void SV_CreateResourceList( void )
 	for( i = 1; i < MAX_CUSTOM; i++ )
 	{
 		s = sv.files_precache[i];
-		if( !COM_CheckString( s )) break; // end of list
+		if( COM_StringEmptyOrNULL( s )) break; // end of list
 		nSize = FS_FileSize( s, false );
 		SV_AddResource( t_generic, s, nSize, RES_FATALIFMISSING, i );
 	}
@@ -393,7 +392,7 @@ static void SV_CreateResourceList( void )
 	for( i = 1; i < MAX_SOUNDS; i++ )
 	{
 		s = sv.sound_precache[i];
-		if( !COM_CheckString( s ))
+		if( COM_StringEmptyOrNULL( s ))
 			break; // end of list
 
 		if( s[0] == '!' )
@@ -414,7 +413,7 @@ static void SV_CreateResourceList( void )
 	for( i = 1; i < MAX_MODELS; i++ )
 	{
 		s = sv.model_precache[i];
-		if( !COM_CheckString( s )) break; // end of list
+		if( COM_StringEmptyOrNULL( s )) break; // end of list
 		nSize = ( s[0] != '*' ) ? FS_FileSize( s, false ) : 0;
 		SV_AddResource( t_model, s, nSize, sv.model_precache_flags[i], i );
 	}
@@ -428,7 +427,7 @@ static void SV_CreateResourceList( void )
 	for( i = 1; i < MAX_EVENTS; i++ )
 	{
 		s = sv.event_precache[i];
-		if( !COM_CheckString( s )) break; // end of list
+		if( COM_StringEmptyOrNULL( s )) break; // end of list
 		nSize = FS_FileSize( s, false );
 		SV_AddResource( t_eventscript, s, nSize, RES_FATALIFMISSING, i );
 	}
@@ -464,7 +463,7 @@ static void SV_CreateBaseline( void )
 	int		delta_type;
 	int		entnum;
 
-	if( svs.maxclients > 1 )
+	if( svs.maxclients > 1 || sv_voice_singleplayer.value )
 		SV_WriteVoiceCodec( &sv.signon );
 
 	if( FBitSet( host.features, ENGINE_QUAKE_COMPATIBLE ))
@@ -475,7 +474,7 @@ static void SV_CreateBaseline( void )
 
 	for( entnum = 0; entnum < svgame.numEntities; entnum++ )
 	{
-		edict_t	*pEdict = EDICT_NUM( entnum );
+		edict_t	*pEdict = SV_EdictNum( entnum );
 
 		if( !SV_IsValidEdict( pEdict ))
 			continue;
@@ -513,7 +512,7 @@ static void SV_CreateBaseline( void )
 
 	for( entnum = 0; entnum < svgame.numEntities; entnum++ )
 	{
-		edict_t	*pEdict = EDICT_NUM( entnum );
+		edict_t	*pEdict = SV_EdictNum( entnum );
 
 		if( !SV_IsValidEdict( pEdict ))
 			continue;
@@ -560,14 +559,14 @@ void SV_FreeOldEntities( void )
 	// at end of frame kill all entities which supposed to it
 	for( i = svs.maxclients + 1; i < svgame.numEntities; i++ )
 	{
-		ent = EDICT_NUM( i );
+		ent = SV_EdictNum( i );
 
 		if( !ent->free && FBitSet( ent->v.flags, FL_KILLME ))
 			SV_FreeEdict( ent );
 	}
 
 	// decrement svgame.numEntities if the highest number entities died
-	for( ; ( ent = EDICT_NUM( svgame.numEntities - 1 )) && ent->free; svgame.numEntities-- );
+	for( ; ( ent = SV_EdictNum( svgame.numEntities - 1 )) && ent->free; svgame.numEntities-- );
 }
 
 /*
@@ -664,7 +663,7 @@ void SV_ActivateServer( int runPhysics )
 	host.movevars_changed = true;
 	Host_SetServerState( ss_active );
 
-	Con_DPrintf( "level loaded at %.2f sec\n", Sys_DoubleTime() - svs.timestart );
+	Con_DPrintf( "level loaded at %.2f sec\n", Platform_DoubleTime() - svs.timestart );
 
 	if( sv.ignored_static_ents )
 		Con_Printf( S_WARN "%i static entities was rejected due buffer overflow\n", sv.ignored_static_ents );
@@ -685,14 +684,16 @@ void SV_DeactivateServer( void )
 	int	i;
 	const char	*cycle = Cvar_VariableString( "disconcfgfile" );
 
-	if( COM_CheckString( cycle ))
+	if( !COM_StringEmptyOrNULL( cycle ))
 		Cbuf_AddTextf( "exec %s\n", cycle );
 
-	if( COM_CheckStringEmpty( sv.name ))
+	if( !COM_StringEmpty( sv.name ))
 		Cbuf_AddTextf( "exec maps/%s_unload.cfg\n", sv.name );
 
 	if( !svs.initialized || sv.state == ss_dead )
 		return;
+
+	SV_InactivateClients();
 
 	svgame.globals->time = sv.time;
 	svgame.dllFuncs.pfnServerDeactivate();
@@ -727,7 +728,7 @@ SV_InitGame
 A brand new game has been started
 ==============
 */
-qboolean SV_InitGame( void )
+qboolean SV_InitGame( qboolean silent )
 {
 	string dllpath;
 
@@ -741,7 +742,10 @@ qboolean SV_InitGame( void )
 
 	if( !SV_LoadProgs( dllpath ))
 	{
-		Con_Printf( S_ERROR "can't initialize %s: %s\n", dllpath, COM_GetLibraryError() );
+		if( !silent )
+			Sys_Warn( "can't initialize %s: %s\n", dllpath, COM_GetLibraryError( ));
+		else
+			Con_Printf( S_ERROR "can't initialize %s: %s\n", dllpath, COM_GetLibraryError( ));
 		return false; // failed to loading server.dll
 	}
 
@@ -829,82 +833,6 @@ static void SV_SetupClients( void )
 	ClearBits( sv_maxclients.flags, FCVAR_CHANGED );
 }
 
-qboolean CRC32_MapFile( dword *crcvalue, const char *filename, qboolean multiplayer )
-{
-	char	headbuf[1024], buffer[1024];
-	int	i, num_bytes, lumplen;
-	int	version, hdr_size;
-	dheader_t	*header;
-	file_t	*f;
-
-	if( !crcvalue ) return false;
-
-	// always calc same checksum for singleplayer
-	if( multiplayer == false )
-	{
-		*crcvalue = (('H'<<24)+('S'<<16)+('A'<<8)+'X');
-		return true;
-	}
-
-	f = FS_Open( filename, "rb", false );
-	if( !f ) return false;
-
-	// read version number
-	FS_Read( f, &version, sizeof( int ));
-	FS_Seek( f, 0, SEEK_SET );
-
-	hdr_size = sizeof( int ) + sizeof( dlump_t ) * HEADER_LUMPS;
-	num_bytes = FS_Read( f, headbuf, hdr_size );
-
-	// corrupted map ?
-	if( num_bytes != hdr_size )
-	{
-		FS_Close( f );
-		return false;
-	}
-
-	header = (dheader_t *)headbuf;
-
-	// invalid version ?
-	switch( header->version )
-	{
-	case Q1BSP_VERSION:
-	case HLBSP_VERSION:
-	case QBSP2_VERSION:
-		break;
-	default:
-		FS_Close( f );
-		return false;
-	}
-
-	CRC32_Init( crcvalue );
-
-	for( i = LUMP_PLANES; i < HEADER_LUMPS; i++ )
-	{
-		lumplen = header->lumps[i].filelen;
-		FS_Seek( f, header->lumps[i].fileofs, SEEK_SET );
-
-		while( lumplen > 0 )
-		{
-			if( lumplen >= sizeof( buffer ))
-				num_bytes = FS_Read( f, buffer, sizeof( buffer ));
-			else num_bytes = FS_Read( f, buffer, lumplen );
-
-			if( num_bytes > 0 )
-			{
-				lumplen -= num_bytes;
-				CRC32_ProcessBuffer( crcvalue, buffer, num_bytes );
-			}
-
-			// file unexpected end ?
-			if( FS_Eof( f )) break;
-		}
-	}
-
-	FS_Close( f );
-
-	return 1;
-}
 
 void SV_FreeTestPacket( void )
 {
@@ -1014,7 +942,7 @@ qboolean SV_SpawnServer( const char *mapname, const char *startspot, qboolean ba
 
 	SV_SetupClients();
 
-	if( !SV_InitGame( ))
+	if( !SV_InitGame( false ))
 		return false;
 
 	Delta_Init(); // re-initialize delta
@@ -1027,7 +955,7 @@ qboolean SV_SpawnServer( const char *mapname, const char *startspot, qboolean ba
 	Log_Printf( "Loading map \"%s\"\n", mapname );
 	Log_PrintServerVars();
 
-	svs.timestart = Sys_DoubleTime();
+	svs.timestart = Platform_DoubleTime();
 	svs.spawncount++; // any partially connected client will be restarted
 
 	for( i = 0; i < ARRAYSIZE( svs.challenge_salt ); i++ )
@@ -1035,13 +963,13 @@ qboolean SV_SpawnServer( const char *mapname, const char *startspot, qboolean ba
 
 	cycle = Cvar_VariableString( "mapchangecfgfile" );
 
-	if( COM_CheckString( cycle ))
+	if( !COM_StringEmptyOrNULL( cycle ))
 		Cbuf_AddTextf( "exec %s\n", cycle );
 
 	Cbuf_AddTextf( "exec maps/%s_load.cfg\n", mapname );
 
 	// let's not have any servers with no name
-	if( !COM_CheckString( hostname.string ))
+	if( COM_StringEmptyOrNULL( hostname.string ))
 		Cvar_Set( "hostname", svgame.dllFuncs.pfnGetGameDescription ? svgame.dllFuncs.pfnGetGameDescription() : FS_Title( ));
 
 	if( startspot )
@@ -1086,17 +1014,9 @@ qboolean SV_SpawnServer( const char *mapname, const char *startspot, qboolean ba
 	svgame.globals->coop = coop.value;
 	svgame.globals->maxClients = svs.maxclients;
 
-	if( sv.background )
-	{
-		// tell the game parts about background state
-		Cvar_FullSet( "sv_background", "1", FCVAR_READ_ONLY );
-		Cvar_FullSet( "cl_background", "1", FCVAR_READ_ONLY );
-	}
-	else
-	{
-		Cvar_FullSet( "sv_background", "0", FCVAR_READ_ONLY );
-		Cvar_FullSet( "cl_background", "0", FCVAR_READ_ONLY );
-	}
+	// tell the game parts about background state
+	Cvar_DirectFullSet( &sv_background, sv.background ? "1" : "0", FCVAR_READ_ONLY );
+	Cvar_DirectFullSet( &cl_background, sv.background ? "1" : "0", FCVAR_READ_ONLY );
 
 	// force normal player collisions for single player
 	if( svs.maxclients == 1 ) Cvar_SetValue( "sv_clienttrace", 1 );
@@ -1139,7 +1059,7 @@ qboolean SV_SpawnServer( const char *mapname, const char *startspot, qboolean ba
 		if( svs.clients[i].state > cs_connected )
 			svs.clients[i].state = cs_connected;
 
-		ent = EDICT_NUM( i + 1 );
+		ent = SV_EdictNum( i + 1 );
 		svs.clients[i].pViewEntity = NULL;
 		svs.clients[i].edict = ent;
 		SV_InitEdict( ent );

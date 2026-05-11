@@ -15,7 +15,6 @@ GNU General Public License for more details.
 
 #include <math.h>
 #include "imagelib.h"
-#include "eiface.h" // ARRAYSIZE
 
 #define DEBUG_LOOKUPS_COUNT 0
 #define USE_FS_SEARCH_FOR_LOOKUPS 1
@@ -74,20 +73,29 @@ static const cubepack_t load_cubemap[] =
 };
 
 // soul of ImageLib - table of image format constants
-const bpc_desc_t PFDesc[] =
+const bpc_desc_t PFDesc[PF_TOTALCOUNT] =
 {
-{ PF_UNKNOWN,	"raw",	0x1908, 0 },
-{ PF_INDEXED_24,	"pal 24",	0x1908, 1 },
-{ PF_INDEXED_32,	"pal 32",	0x1908, 1 },
-{ PF_RGBA_32,	"RGBA 32",0x1908, 4 },
-{ PF_BGRA_32,	"BGRA 32",0x80E1, 4 },
-{ PF_RGB_24,	"RGB 24",	0x1908, 3 },
-{ PF_BGR_24,	"BGR 24",	0x80E0, 3 },
-{ PF_LUMINANCE,	"LUM 8",	0x1909, 1 },
-{ PF_DXT1,	"DXT 1",	0x83F1, 4 },
-{ PF_DXT3,	"DXT 3",	0x83F2, 4 },
-{ PF_DXT5,	"DXT 5",	0x83F3, 4 },
-{ PF_ATI2,	"ATI 2",	0x8837, 4 },
+{ PF_UNKNOWN,       "raw",       RF_RGBA,       0 },
+{ PF_INDEXED_24,    "pal 24",    RF_RGBA,       1 },
+{ PF_INDEXED_32,    "pal 32",    RF_RGBA,       1 },
+{ PF_RGBA_32,       "RGBA 32",   RF_RGBA,       4 },
+{ PF_BGRA_32,       "BGRA 32",   RF_BGRA,       4 },
+{ PF_RGB_24,        "RGB 24",    RF_RGBA,       3 },
+{ PF_BGR_24,        "BGR 24",    RF_BGR,        3 },
+{ PF_LUMINANCE,     "LUM 8",     RF_LUMINANCE,  1 },
+{ PF_DXT1,          "DXT 1",     RF_COMPRESSED, 4 },
+{ PF_DXT3,          "DXT 3",     RF_COMPRESSED, 4 },
+{ PF_DXT5,          "DXT 5",     RF_COMPRESSED, 4 },
+{ PF_ATI2,          "ATI 2",     RF_COMPRESSED, 4 },
+{ PF_BC4_SIGNED,    "BC4 S",     RF_COMPRESSED, 4 },
+{ PF_BC4_UNSIGNED,  "BC4 U",     RF_COMPRESSED, 4 },
+{ PF_BC5_SIGNED,    "BC5 S",     RF_COMPRESSED, 4 },
+{ PF_BC5_UNSIGNED,  "BC5 U",     RF_COMPRESSED, 4 },
+{ PF_BC6H_SIGNED,   "BC6H S",    RF_COMPRESSED, 4 },
+{ PF_BC6H_UNSIGNED, "BC6H U",    RF_COMPRESSED, 4 },
+{ PF_BC7_UNORM,     "BC7 UNORM", RF_COMPRESSED, 4 },
+{ PF_BC7_SRGB,      "BC7 SRGB",  RF_COMPRESSED, 4 },
+{ PF_KTX2_RAW,      "KTX2",      RF_COMPRESSED, 4 },
 };
 
 #if DEBUG_LOOKUPS_COUNT
@@ -108,7 +116,7 @@ static void Image_ReportLookupsCount( const char *name )
 
 static void Image_IncrementLookupTime( void )
 {
-	double t = Sys_DoubleTime();
+	double t = Platform_DoubleTime();
 	double dt = t - g_lookup_start;
 
 	g_lookup_time += dt;
@@ -116,7 +124,7 @@ static void Image_IncrementLookupTime( void )
 	g_lookups++;
 	g_lookups_total++;
 
-	g_lookup_start = Sys_DoubleTime();
+	g_lookup_start = Platform_DoubleTime();
 }
 #else
 static void Image_ReportLookupsCount( const char *name )
@@ -142,6 +150,7 @@ void Image_Reset( void )
 	image.fogParams[1] = 0;
 	image.fogParams[2] = 0;
 	image.fogParams[3] = 0;
+	image.black_pixel = 0;
 
 	// pointers will be saved with prevoius picture struct
 	// don't care about it
@@ -154,7 +163,7 @@ void Image_Reset( void )
 #if DEBUG_LOOKUPS_COUNT
 	g_lookups = 0;
 	g_lookup_time = 0.0f;
-	g_lookup_start = Sys_DoubleTime();
+	g_lookup_start = Platform_DoubleTime();
 #endif // DEBUG_LOOKUPS_COUNT
 }
 
@@ -163,6 +172,9 @@ static MALLOC_LIKE( FS_FreeImage, 1 ) rgbdata_t *ImagePack( const char *name )
 	rgbdata_t	*pack;
 
 	Image_ReportLookupsCount( name );
+
+	if( Image_CheckFlag( IL_LOAD_PLAYER_DECAL ))
+		SetBits( image.flags, IMAGE_PLAYERDECAL );
 
 	// clear any force flags
 	image.force_flags = 0;
@@ -258,7 +270,7 @@ static const loadpixformat_t *Image_GetLoadFormatForExtension( const char *ext )
 {
 	const loadpixformat_t *format;
 
-	if( !COM_CheckStringEmpty( ext ))
+	if( COM_StringEmpty( ext ))
 		return NULL;
 
 	for( format = image.loadformats; format->ext; format++ )
@@ -493,7 +505,7 @@ writes image as any known format
 qboolean FS_SaveImage( const char *filename, rgbdata_t *pix )
 {
 	const char	*ext = COM_FileExtension( filename );
-	qboolean		anyformat = !COM_CheckStringEmpty( ext );
+	qboolean		anyformat = COM_StringEmpty( ext );
 	string		path, savename;
 	const savepixformat_t *format;
 
@@ -596,14 +608,15 @@ FS_CopyImage
 make an image copy
 ================
 */
-rgbdata_t *FS_CopyImage( rgbdata_t *in )
+rgbdata_t *FS_CopyImage( const rgbdata_t *in )
 {
 	rgbdata_t	*out;
 	int	palSize = 0;
 
-	if( !in ) return NULL;
+	if( !in )
+		return NULL;
 
-	out = Mem_Malloc( host.imagepool, sizeof( rgbdata_t ));
+	out = Mem_Malloc( host.imagepool, sizeof( *out ));
 	*out = *in;
 
 	switch( in->type )
@@ -708,7 +721,7 @@ void Test_RunImagelib( void )
 }
 
 #define IMPLEMENT_IMAGELIB_FUZZ_TARGET( export, target ) \
-int export( const uint8_t *Data, size_t Size ); \
+int EXPORT export( const uint8_t *Data, size_t Size ); \
 int EXPORT export( const uint8_t *Data, size_t Size ) \
 { \
 	rgbdata_t *rgb; \

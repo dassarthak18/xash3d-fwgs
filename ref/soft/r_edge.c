@@ -39,15 +39,11 @@ int          r_currentkey;
 
 int          current_iv;
 
-int          edge_head_u_shift20, edge_tail_u_shift20;
+static int edge_head_u_shift20, edge_tail_u_shift20;
 
-static void  (*pdrawfunc)( void );
+static void (*pdrawfunc)( void );
 
-edge_t       edge_head;
-edge_t       edge_tail;
-
-edge_t       edge_aftertail;
-edge_t       edge_sentinel;
+static edge_t edge_head, edge_tail, edge_aftertail, edge_sentinel;
 
 static float fv;
 
@@ -766,16 +762,12 @@ D_CalcGradients
 */
 static void D_CalcGradients( msurface_t *pface )
 {
-	mplane_t *pplane;
 	float    mipscale;
 	vec3_t   p_temp1;
 	vec3_t   p_saxis, p_taxis;
 	float    t;
 
-	pplane = pface->plane;
-
 	mipscale = 1.0f / (float)( 1 << miplevel );
-
 
 	if( pface->texinfo->flags & TEX_WORLD_LUXELS )
 	{
@@ -885,7 +877,7 @@ static void D_TurbulentSurf( surf_t *s )
 		// TODO: store once at start of frame
 		RI.currententity = s->entity; // FIXME: make this passed in to
 		// R_RotateBmodel ()
-		VectorSubtract( RI.vieworg, RI.currententity->origin,
+		VectorSubtract( RI.rvp.vieworigin, RI.currententity->origin,
 				local_modelorg );
 		TransformVector( local_modelorg, transformed_modelorg );
 
@@ -948,7 +940,7 @@ static void D_AlphaSurf( surf_t *s )
 // TODO: store once at start of frame
 	RI.currententity = s->entity; // FIXME: make this passed in to
 	// R_RotateBmodel ()
-	VectorSubtract( RI.vieworg, RI.currententity->origin, local_modelorg );
+	VectorSubtract( RI.rvp.vieworigin, RI.currententity->origin, local_modelorg );
 	TransformVector( local_modelorg, transformed_modelorg );
 
 	R_RotateBmodel(); // FIXME: don't mess with the frustum,
@@ -1029,7 +1021,7 @@ static void D_SolidSurf( surf_t *s )
 		// TODO: store once at start of frame
 		RI.currententity = s->entity; // FIXME: make this passed in to
 		// R_RotateBmodel ()
-		VectorSubtract( RI.vieworg, RI.currententity->origin, local_modelorg );
+		VectorSubtract( RI.rvp.vieworigin, RI.currententity->origin, local_modelorg );
 		TransformVector( local_modelorg, transformed_modelorg );
 
 		R_RotateBmodel(); // FIXME: don't mess with the frustum,
@@ -1131,7 +1123,7 @@ void D_DrawSurfaces( void )
 	surf_t *s;
 
 //	currententity = NULL;	//&r_worldentity;
-	VectorSubtract( RI.vieworg, vec3_origin, tr.modelorg );
+	VectorSubtract( RI.rvp.vieworigin, vec3_origin, tr.modelorg );
 	TransformVector( tr.modelorg, transformed_modelorg );
 	VectorCopy( transformed_modelorg, world_transformed_modelorg );
 
@@ -1156,7 +1148,7 @@ void D_DrawSurfaces( void )
 		D_DrawflatSurfaces();
 
 	// RI.currententity = NULL;	//&r_worldentity;
-	VectorSubtract( RI.vieworg, vec3_origin, tr.modelorg );
+	VectorSubtract( RI.rvp.vieworigin, vec3_origin, tr.modelorg );
 	R_TransformFrustum();
 }
 
